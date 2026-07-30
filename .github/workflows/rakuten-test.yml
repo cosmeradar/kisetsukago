@@ -1,0 +1,27 @@
+name: rakuten-test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rakuten API test
+        env:
+          APP_ID: ${{ secrets.RAKUTEN_APP_ID }}
+          ACCESS_KEY: ${{ secrets.RAKUTEN_ACCESS_KEY }}
+          AFFILIATE_ID: ${{ secrets.RAKUTEN_AFFILIATE_ID }}
+        run: |
+          curl -sS -G "https://openapi.rakuten.co.jp/ichibams/api/IchibaItem/Search/20260701" \
+            --data-urlencode "applicationId=$APP_ID" \
+            --data-urlencode "accessKey=$ACCESS_KEY" \
+            --data-urlencode "affiliateId=$AFFILIATE_ID" \
+            --data-urlencode "keyword=日傘" \
+            --data-urlencode "hits=3" \
+            --data-urlencode "formatVersion=2" \
+            --data-urlencode "elements=itemName,itemPrice,itemUrl,affiliateUrl" \
+            -H "Referer: https://kisetsukago.com/" \
+            -o out.json -w "HTTP status: %{http_code}\n"
+          echo "----- response -----"
+          jq . out.json || cat out.json
