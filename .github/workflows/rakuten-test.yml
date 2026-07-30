@@ -22,6 +22,7 @@ jobs:
             --data-urlencode "formatVersion=2" \
             --data-urlencode "elements=itemName,itemPrice,itemUrl,affiliateUrl" \
             -H "Referer: https://kisetsukago.com/" \
+            -H "Origin: https://kisetsukago.com" \
             -o out.json -w "HTTP status: %{http_code}\n"
           echo "----- response -----"
           jq . out.json || cat out.json
