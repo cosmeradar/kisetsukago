@@ -7,20 +7,6 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - name: JMA data test
-        run: |
-          echo "----- latest_time -----"
-          curl -sS "https://www.jma.go.jp/bosai/amedas/data/latest_time.txt" -o latest.txt -w "HTTP status: %{http_code}\n"
-          RAW=$(cat latest.txt)
-          echo "気象庁が返した観測時刻: $RAW"
-          TS=$(echo "$RAW" | tr -d '\n' | sed 's/[-:+T]//g' | cut -c1-14)
-          OBS=$(TZ=Asia/Tokyo date -d "$RAW" +%s)
-          NOW=$(date +%s)
-          echo "観測からの経過分数: $(( (NOW - OBS) / 60 )) 分"
-          echo "----- amedas map -----"
-          curl -sS "https://www.jma.go.jp/bosai/amedas/data/map/${TS}.json" -o map.json -w "HTTP status: %{http_code}\n"
-          echo "観測地点数: $(jq 'length' map.json)"
-          echo "気温が取れている地点数: $(jq '[to_entries[] | select(.value.temp[0] != null)] | length' map.json)"
-          echo "35度以上の地点数: $(jq '[to_entries[] | select(.value.temp[0] != null and .value.temp[0] >= 35)] | length' map.json)"
-          echo "最高気温の上位5地点:"
-          jq -r '[to_entries[] | select(.value.temp[0] != null) | {code: .key, temp: .value.temp[0]}] | sort_by(.temp) | reverse | .[0:5][] | "\(.code) \(.temp)℃"' map.json
+        run: python3 scripts/heat.py
