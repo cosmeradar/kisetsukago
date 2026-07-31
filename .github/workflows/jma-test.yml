@@ -10,12 +10,15 @@ jobs:
       - name: JMA data test
         run: |
           echo "----- latest_time -----"
-          curl -sS "https://www.jma.go.jp/bosai/amedas/data/latest_time.txt" -w "\nHTTP status: %{http_code}\n" -o latest.txt
-          cat latest.txt
-          echo ""
-          TS=$(cat latest.txt | tr -d '\n' | sed 's/[-:+]//g' | cut -c1-14)
-          echo "変換した時刻: $TS"
+          curl -sS "https://www.jma.go.jp/bosai/amedas/data/latest_time.txt" -o latest.txt -w "HTTP status: %{http_code}\n"
+          RAW=$(cat latest.txt)
+          echo "気象庁が返した観測時刻: $RAW"
+          TS=$(echo "$RAW" | tr -d '\n' | sed 's/[-:+T]//g' | cut -c1-14)
+          echo "変換後: $TS"
           echo "現在のJST: $(TZ=Asia/Tokyo date '+%Y%m%d%H%M%S')"
+          OBS=$(TZ=Asia/Tokyo date -d "$RAW" +%s)
+          NOW=$(date +%s)
+          echo "観測からの経過分数: $(( (NOW - OBS) / 60 )) 分"
           echo "----- amedas map -----"
           curl -sS "https://www.jma.go.jp/bosai/amedas/data/map/${TS}.json" -o map.json -w "HTTP status: %{http_code}\n"
           echo "観測地点数: $(jq 'length' map.json)"
