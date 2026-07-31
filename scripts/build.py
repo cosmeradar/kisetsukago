@@ -27,7 +27,7 @@ HOT = 35.0
 MAX_AGE_MINUTES = 180
 OUT_PATH = "moushou/index.html"
 
-KEYWORDS = ["ハンディファン", "冷感 タオル", "日傘"]
+KEYWORDS = ["ハンディファン"]
 ITEMS_PER_KEYWORD = 3
 
 # 私が書いた文章にだけ適用する禁止表現。
