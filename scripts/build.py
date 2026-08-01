@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""猛暑ページを組み立てる。
+"""都道府県別の気温ページを組み立てる。
 
-気象庁アメダス（都道府県ごとの代表地点の気温）と
-楽天商品検索APIの結果を、あらかじめ用意した固定文に差し込んで
-HTML を書き出す。公開前の検査に1つでも引っかかったら何も書かずに終了する。
+夏（4〜9月）は気温の高い順、冬（10〜3月）は低い順に並べる。
+商品は楽天のレビュー件数上位から、日付を種にして日替わりで選ぶ。
+公開前の検査に1つでも引っかかったら何も書かずに終了する。
 """
 
+import hashlib
 import html
 import json
 import os
+import random
 import sys
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone, timedelta
@@ -23,22 +27,42 @@ FORECAST_AREA = "https://www.jma.go.jp/bosai/forecast/const/forecast_area.json"
 RAKUTEN = "https://openapi.rakuten.co.jp/ichibams/api/IchibaItem/Search/20260701"
 SITE = "https://kisetsukago.com"
 
-HOT = 35.0
+OUT_PATH = "kion/index.html"
 MAX_AGE_MINUTES = 180
-OUT_PATH = "moushou/index.html"
+HOT = 35.0
+COLD = 0.0
 
-KEYWORDS = ["ハンディファン"]
-ITEMS_PER_KEYWORD = 3
+# 楽天から取る候補数と、その中から見せる数
+POOL_SIZE = 20
+SHOW_PER_KEYWORD = 3
+RAKUTEN_INTERVAL_SEC = 3
+RETRY_CODES = (429, 500, 502, 503, 504)
 
-# 私が書いた文章にだけ適用する禁止表現。
-# 商品名は店舗が付けたものなので対象外にする。
+SEASONS = {
+    "summer": {
+        "months": (4, 5, 6, 7, 8, 9),
+        "order": "desc",
+        "order_label": "気温の高い順",
+        "heading": "暑い時期に選ばれているもの",
+        "keywords": ["ハンディファン", "冷感 タオル", "日傘"],
+    },
+    "winter": {
+        "months": (10, 11, 12, 1, 2, 3),
+        "order": "asc",
+        "order_label": "気温の低い順",
+        "heading": "寒い時期に選ばれているもの",
+        "keywords": ["電気毛布", "加湿器", "あったかインナー"],
+    },
+}
+
+# 私が書いた文章にだけ適用する禁止表現。商品名は店舗が付けたものなので対象外。
 BANNED = [
     "防げます", "防げる", "予防できます", "防止できます", "防止します",
     "安全です", "危険はありません", "問題ありません",
     "効果があります", "効きます", "改善します", "治ります", "治せます",
-    "熱中症を防", "熱中症対策になります",
+    "熱中症を防", "熱中症対策になります", "風邪を防", "凍傷を防",
     "避難してください", "外出は控えてください", "水分を取ってください",
-    "しましょう",
+    "暖房を使ってください", "しましょう",
 ]
 
 PREF = {
@@ -59,16 +83,31 @@ PREF = {
 
 # ---------- 取得 ----------
 
-def get(url, as_json=True, headers=None):
+def get(url, as_json=True, headers=None, tries=4):
+    """取得する。混雑や一時的な不調なら間を空けて数回試す。"""
     h = {"User-Agent": "kisetsukago/0.1"}
     h.update(headers or {})
-    req = urllib.request.Request(url, headers=h)
-    with urllib.request.urlopen(req, timeout=30) as r:
-        raw = r.read().decode("utf-8")
-    return json.loads(raw) if as_json else raw.strip()
+    last = None
+    for i in range(tries):
+        try:
+            req = urllib.request.Request(url, headers=h)
+            with urllib.request.urlopen(req, timeout=30) as r:
+                raw = r.read().decode("utf-8")
+            return json.loads(raw) if as_json else raw.strip()
+        except urllib.error.HTTPError as err:
+            last = err
+            if err.code not in RETRY_CODES:
+                raise
+        except urllib.error.URLError as err:
+            last = err
+        wait = 3 * (i + 1)
+        print(f"  取得に失敗（{last}）。{wait}秒待って再試行します")
+        time.sleep(wait)
+    raise last
 
 
 def value_of(entry, key):
+    """アメダスの値は [値, 品質コード] の形。値だけ取り出す。"""
     v = entry.get(key)
     if isinstance(v, list) and v and isinstance(v[0], (int, float)):
         return float(v[0])
@@ -84,17 +123,20 @@ def fetch_weather():
     return obs_at, obs, table, area
 
 
-def fetch_items(keyword, app_id, access_key, affiliate_id):
+def fetch_pool(keyword, app_id, access_key, affiliate_id):
+    """レビュー件数の多い順に候補を取る。"""
     params = {
         "applicationId": app_id,
         "accessKey": access_key,
         "affiliateId": affiliate_id,
         "keyword": keyword,
-        "hits": str(ITEMS_PER_KEYWORD),
+        "hits": str(POOL_SIZE),
+        "sort": "-reviewCount",
         "formatVersion": "2",
         "imageFlag": "1",
         "availability": "1",
-        "elements": "itemName,itemPrice,affiliateUrl,mediumImageUrls,shopName",
+        "hasReviewFlag": "1",
+        "elements": "itemName,itemPrice,affiliateUrl,mediumImageUrls,shopName,reviewCount",
     }
     url = RAKUTEN + "?" + urllib.parse.urlencode(params)
     data = get(url, headers={"Referer": SITE + "/", "Origin": SITE})
@@ -106,13 +148,29 @@ def fetch_items(keyword, app_id, access_key, affiliate_id):
             "price": it.get("itemPrice"),
             "url": it.get("affiliateUrl", ""),
             "shop": it.get("shopName", ""),
+            "reviews": it.get("reviewCount", 0),
             "image": images[0] if images else "",
             "keyword": keyword,
         })
     return out
 
 
+def pick_daily(pool, day, keyword, n=SHOW_PER_KEYWORD):
+    """日付とキーワードを種にして選ぶ。同じ日なら何度動かしても同じ結果になる。"""
+    if not pool:
+        return []
+    seed = int(hashlib.sha256(f"{day}:{keyword}".encode()).hexdigest()[:12], 16)
+    rng = random.Random(seed)
+    chosen = rng.sample(pool, min(n, len(pool)))
+    chosen.sort(key=lambda it: -it.get("reviews", 0))
+    return chosen
+
+
 # ---------- 集計 ----------
+
+def season_of(month):
+    return "summer" if month in SEASONS["summer"]["months"] else "winter"
+
 
 def stations_by_pref(forecast_area):
     out = {}
@@ -126,7 +184,9 @@ def stations_by_pref(forecast_area):
     return {k: sorted(v) for k, v in out.items()}
 
 
-def summarize(by_pref, obs, table):
+def summarize(by_pref, obs, table, order):
+    """都道府県ごとに代表地点をまとめる。夏は最も高い地点、冬は最も低い地点を選ぶ。"""
+    want_high = (order == "desc")
     rows = []
     for pref, codes in by_pref.items():
         best = None
@@ -134,15 +194,19 @@ def summarize(by_pref, obs, table):
             temp = value_of(obs.get(code, {}), "temp")
             if temp is None:
                 continue
-            if best is None or temp > best["temp"]:
+            if best is None or (temp > best["temp"] if want_high else temp < best["temp"]):
                 best = {"temp": temp, "spot": table.get(code, {}).get("kjName") or code}
         rows.append({
             "pref": pref,
             "temp": best["temp"] if best else None,
             "spot": best["spot"] if best else None,
             "hot": bool(best and best["temp"] >= HOT),
+            "cold": bool(best and best["temp"] <= COLD),
         })
-    rows.sort(key=lambda r: (r["temp"] is None, -(r["temp"] or 0), r["pref"]))
+    if want_high:
+        rows.sort(key=lambda r: (r["temp"] is None, -(r["temp"] or 0), r["pref"]))
+    else:
+        rows.sort(key=lambda r: (r["temp"] is None, (r["temp"] if r["temp"] is not None else 999), r["pref"]))
     return rows
 
 
@@ -178,64 +242,88 @@ def run_checks(rows, items, age, obs, by_pref, prose):
 
 # ---------- 組み立て ----------
 
-def prose_text(obs_at, hot_count):
-    """毎日変わるのは日時と件数だけ。言い回しは固定。"""
+def prose_text(obs_at, season, rows):
+    """毎日変わるのは日時と数字だけ。言い回しは固定。"""
+    cfg = SEASONS[season]
+    got = [r for r in rows if r["temp"] is not None]
+    high = max((r["temp"] for r in got), default=None)
+    low = min((r["temp"] for r in got), default=None)
+    span = ""
+    if high is not None and low is not None:
+        span = f"全国の代表地点では{low:.1f}度から{high:.1f}度までの幅がありました。"
     return (
-        f"{obs_at:%Y年%-m月%-d日 %H:%M}（日本時間）時点の気象庁の観測では、"
-        f"各都道府県の代表地点のうち{HOT:.0f}度以上を記録したのは{hot_count}都道府県でした。"
-        "下の表は、都道府県ごとに代表地点の中で最も気温の高かった地点を並べたものです。"
+        f"{obs_at:%Y年%-m月%-d日 %H:%M}（日本時間）時点の気象庁の観測をもとに、"
+        f"都道府県ごとの気温を{cfg['order_label']}に並べています。{span}"
         "気象庁が天気予報に使う代表地点のみを対象としているため、"
-        "その都道府県の最高気温とは限りません。"
+        "その都道府県の最高気温や最低気温とは限りません。"
     )
 
 
-def render(obs_at, rows, items, prose):
+def render(obs_at, rows, items, prose, season):
     e = html.escape
-    hot_rows = [r for r in rows if r["hot"]]
+    cfg = SEASONS[season]
+    got = [r for r in rows if r["temp"] is not None]
+    high = max((r["temp"] for r in got), default=0)
+    low = min((r["temp"] for r in got), default=0)
 
     table_html = []
     for r in rows:
         if r["temp"] is None:
             cells = '<td class="t">—</td><td class="s">データなし</td>'
         else:
-            mark = ' <span class="hot">猛暑日</span>' if r["hot"] else ""
+            mark = ""
+            if r["hot"]:
+                mark = ' <span class="tag hot">35℃以上</span>'
+            elif r["cold"]:
+                mark = ' <span class="tag cold">0℃以下</span>'
             cells = (f'<td class="t">{r["temp"]:.1f}℃{mark}</td>'
                      f'<td class="s">{e(r["spot"])}</td>')
         table_html.append(f'<tr><th scope="row">{e(r["pref"])}</th>{cells}</tr>')
 
-    cards = []
+    groups = {}
     for it in items:
-        price = f"{it['price']:,}円" if isinstance(it["price"], int) else ""
-        img = (f'<img src="{e(it["image"])}" alt="" loading="lazy" width="128" height="128">'
-               if it["image"] else "")
-        cards.append(
-            '<li class="card">'
-            f'<a href="{e(it["url"])}" rel="nofollow sponsored noopener" target="_blank">'
-            f'{img}<span class="pname">{e(it["name"])}</span></a>'
-            f'<span class="price">{price}</span>'
-            f'<span class="shop">{e(it["shop"])}</span>'
-            "</li>"
-        )
+        groups.setdefault(it["keyword"], []).append(it)
+
+    sections = []
+    for kw in cfg["keywords"]:
+        group = groups.get(kw, [])
+        if not group:
+            continue
+        cards = []
+        for it in group:
+            price = f"{it['price']:,}円" if isinstance(it["price"], int) else ""
+            img = (f'<img src="{e(it["image"])}" alt="" loading="lazy" width="128" height="128">'
+                   if it["image"] else "")
+            rev = f'<span class="rev">レビュー{it["reviews"]:,}件</span>' if it.get("reviews") else ""
+            cards.append(
+                '<li class="card">'
+                f'<a href="{e(it["url"])}" rel="nofollow sponsored noopener" target="_blank">'
+                f'{img}<span class="pname">{e(it["name"])}</span></a>'
+                f'<span class="price">{price}</span>{rev}'
+                f'<span class="shop">{e(it["shop"])}</span>'
+                "</li>"
+            )
+        sections.append(f'<h3 class="kw">{e(kw)}</h3><ul class="grid">{"".join(cards)}</ul>')
 
     return f"""<!DOCTYPE html>
 <html lang="ja">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>猛暑・暑い日｜季節かご</title>
-<meta name="description" content="気象庁の観測をもとに、都道府県ごとの代表地点の気温をまとめ、暑い時期に売れているものを紹介します。">
-<link rel="canonical" href="{SITE}/moushou/">
+<title>都道府県別の気温｜季節かご</title>
+<meta name="description" content="気象庁の観測をもとに、都道府県ごとの代表地点の気温をまとめています。">
+<link rel="canonical" href="{SITE}/kion/">
 <style>
   :root{{
     --paper:#FBFAF6; --ink:#1C2A33; --ink-soft:#5A6670;
-    --ai:#2F4E7C; --koke:#6B7F5B; --hi:#B4472B; --rule:#E2DFD5;
+    --ai:#2F4E7C; --koke:#6B7F5B; --hi:#B4472B; --cold:#3C6E8F; --rule:#E2DFD5;
     --mincho:"Hiragino Mincho ProN","Yu Mincho","YuMincho","MS PMincho",serif;
     --gothic:"Hiragino Kaku Gothic ProN","Yu Gothic","YuGothic",Meiryo,system-ui,sans-serif;
   }}
   *{{box-sizing:border-box}}
   body{{margin:0;background:var(--paper);color:var(--ink);
        font-family:var(--gothic);font-size:16px;line-height:1.9}}
-  .wrap{{max-width:44rem;margin:0 auto;padding:3rem 1.5rem 3rem}}
+  .wrap{{max-width:44rem;margin:0 auto;padding:3rem 1.5rem}}
   a{{color:var(--ai);text-underline-offset:.2em}}
   a:focus-visible{{outline:2px solid var(--ai);outline-offset:3px}}
   .home{{font-size:.8125rem;color:var(--ink-soft);margin:0 0 2rem}}
@@ -251,17 +339,20 @@ def render(obs_at, rows, items, prose):
   th[scope=row]{{font-weight:400;width:38%}}
   td.t{{width:34%;font-variant-numeric:tabular-nums}}
   td.s{{color:var(--ink-soft);font-size:.875rem}}
-  .hot{{color:var(--hi);font-size:.75rem;letter-spacing:.08em;margin-left:.3rem}}
-  ul.grid{{list-style:none;margin:0;padding:0;display:grid;gap:1.5rem 1rem;
+  .tag{{font-size:.75rem;letter-spacing:.06em;margin-left:.3rem}}
+  .tag.hot{{color:var(--hi)}}
+  .tag.cold{{color:var(--cold)}}
+  h3.kw{{font-size:.875rem;font-weight:600;margin:0 0 .75rem}}
+  h3.kw::before{{content:"／ ";color:var(--koke)}}
+  ul.grid{{list-style:none;margin:0 0 2rem;padding:0;display:grid;gap:1.5rem 1rem;
            grid-template-columns:repeat(auto-fill,minmax(9rem,1fr))}}
   .card a{{display:block;text-decoration:none;color:var(--ink)}}
   .card img{{width:100%;height:auto;aspect-ratio:1;object-fit:contain;
              background:#fff;border:1px solid var(--rule)}}
-  .pname{{display:block;font-size:.8125rem;line-height:1.6;margin-top:.5rem;
-          display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;
-          overflow:hidden}}
+  .pname{{display:-webkit-box;font-size:.8125rem;line-height:1.6;margin-top:.5rem;
+          -webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}}
   .price{{display:block;font-size:.875rem;margin-top:.25rem}}
-  .shop{{display:block;font-size:.75rem;color:var(--ink-soft)}}
+  .rev,.shop{{display:block;font-size:.75rem;color:var(--ink-soft)}}
   .note{{font-size:.875rem;color:var(--ink-soft)}}
   ul.links{{list-style:none;margin:0;padding:0;font-size:.9375rem}}
   ul.links li{{margin-bottom:.35rem}}
@@ -275,10 +366,10 @@ def render(obs_at, rows, items, prose):
 
   <p class="home"><a href="/">季節かご</a></p>
 
-  <h1>猛暑・暑い日</h1>
-  <p class="stamp">観測時刻 {obs_at:%Y-%m-%d %H:%M} 日本時間／{len(hot_rows)}都道府県で35℃以上</p>
+  <h1>都道府県別の気温</h1>
+  <p class="stamp">観測 {obs_at:%Y-%m-%d %H:%M} 日本時間／{cfg['order_label']}／{low:.1f}〜{high:.1f}℃</p>
 
-  <p class="lede">{html.escape(prose)}</p>
+  <p class="lede">{e(prose)}</p>
 
   <h2>都道府県別 代表地点の気温</h2>
   <table>
@@ -289,14 +380,12 @@ def render(obs_at, rows, items, prose):
   </table>
   <p class="note">気象庁が公開しているアメダスの観測値をもとにしています。10分ごとに更新される値のうち、上に記した時刻のものです。</p>
 
-  <h2>暑い時期に売れているもの</h2>
-  <ul class="grid">
-    {"".join(cards)}
-  </ul>
-  <p class="note">楽天市場の商品検索結果です。商品名は各店舗が登録したものをそのまま表示しています。価格・在庫は変動するため、最新の情報は各商品ページでご確認ください。</p>
+  <h2>{e(cfg['heading'])}</h2>
+  {"".join(sections)}
+  <p class="note">楽天市場でレビュー件数の多い商品の中から選んで表示しています。商品名は各店舗が登録したものをそのままにしています。価格・在庫は変動するため、最新の情報は各商品ページでご確認ください。</p>
 
   <h2>このページの位置づけ</h2>
-  <p class="note">当サイトは商品を紹介することを目的としています。気象情報や防災情報を提供するものではなく、健康や安全に関する判断の根拠として使えるものではありません。暑さに関する情報や警戒の呼びかけは、下記の公式発表をご確認ください。</p>
+  <p class="note">当サイトは商品を紹介することを目的としています。気象情報や防災情報を提供するものではなく、健康や安全に関する判断の根拠として使えるものではありません。気象に関する情報や警戒の呼びかけは、下記の公式発表をご確認ください。</p>
 
   <h2>公式情報</h2>
   <ul class="links">
@@ -326,21 +415,30 @@ def main():
         print("楽天の設定が渡されていません")
         sys.exit(1)
 
+    now_jst = datetime.now(JST)
+    season = season_of(now_jst.month)
+    cfg = SEASONS[season]
+    day = now_jst.strftime("%Y-%m-%d")
+    print(f"日付(JST): {day} / 季節: {season} / 並び: {cfg['order_label']}")
+
     obs_at, obs, table, area = fetch_weather()
-    age = (datetime.now(JST) - obs_at).total_seconds() / 60
+    age = (now_jst - obs_at).total_seconds() / 60
     by_pref = stations_by_pref(area)
-    rows = summarize(by_pref, obs, table)
+    rows = summarize(by_pref, obs, table, cfg["order"])
 
     items = []
-    for kw in KEYWORDS:
-        items.extend(fetch_items(kw, app_id, access_key, affiliate_id))
+    for i, kw in enumerate(cfg["keywords"]):
+        if i:
+            time.sleep(RAKUTEN_INTERVAL_SEC)
+        pool = fetch_pool(kw, app_id, access_key, affiliate_id)
+        chosen = pick_daily(pool, day, kw)
+        items.extend(chosen)
+        print(f"  「{kw}」: 候補{len(pool)}件から{len(chosen)}件")
 
-    hot_count = sum(1 for r in rows if r["hot"])
-    prose = prose_text(obs_at, hot_count)
-
+    prose = prose_text(obs_at, season, rows)
     problems = run_checks(rows, items, age, obs, by_pref, prose)
     print(f"観測時刻: {obs_at:%Y-%m-%d %H:%M}（{age:.0f}分前）")
-    print(f"都道府県: {len(by_pref)} / 35度以上: {hot_count} / 商品: {len(items)}件")
+    print(f"都道府県: {len(by_pref)} / 商品: {len(items)}件")
     if problems:
         print("--- 検査で問題を検出。公開しません ---")
         for p in problems:
@@ -349,7 +447,7 @@ def main():
 
     os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
     with open(OUT_PATH, "w", encoding="utf-8") as f:
-        f.write(render(obs_at, rows, items, prose))
+        f.write(render(obs_at, rows, items, prose, season))
     print(f"検査: 問題なし / 書き出し: {OUT_PATH}")
 
 
