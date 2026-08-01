@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>季節かご｜天気と季節に合わせた買い物のヒント</title>
+<meta name="description" content="気象庁の観測をもとに、天気や季節の条件ごとに関連する商品をまとめて紹介しています。">
+<link rel="canonical" href="https://kisetsukago.com/">
+<style>
+  :root{
+    --paper:#FBFAF6; --ink:#1C2A33; --ink-soft:#5A6670;
+    --ai:#2F4E7C; --koke:#6B7F5B; --rule:#E2DFD5;
+    --mincho:"Hiragino Mincho ProN","Yu Mincho","YuMincho","MS PMincho",serif;
+    --gothic:"Hiragino Kaku Gothic ProN","Yu Gothic","YuGothic",Meiryo,system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{margin:0;background:var(--paper);color:var(--ink);
+       font-family:var(--gothic);font-size:16px;line-height:1.9}
+  .wrap{max-width:38rem;margin:0 auto;padding:4rem 1.5rem 3rem}
+  a{color:var(--ai);text-underline-offset:.2em}
+  a:focus-visible{outline:2px solid var(--ai);outline-offset:3px}
+  .mark{font-family:var(--mincho);font-size:2.5rem;line-height:1.3;
+        letter-spacing:.16em;margin:0 0 .6rem;font-weight:400}
+  .romaji{font-size:.7rem;letter-spacing:.28em;text-transform:uppercase;
+          color:var(--ink-soft);margin:0 0 2.75rem}
+  .lede{font-family:var(--mincho);font-size:1.0625rem;margin:0 0 3rem}
+  h2{font-size:.75rem;letter-spacing:.2em;color:var(--ink-soft);font-weight:600;
+     margin:0 0 1rem;padding-top:2.25rem;border-top:1px solid var(--rule)}
+  ul.pages{list-style:none;margin:0 0 1rem;padding:0}
+  ul.pages li{margin-bottom:.75rem}
+  .entry{display:block;text-decoration:none;border:1px solid var(--rule);
+         background:#fff;padding:1rem 1.15rem}
+  .entry:hover{border-color:var(--koke)}
+  .entry .t{display:block;font-family:var(--mincho);font-size:1.125rem;
+            color:var(--ink);margin-bottom:.15rem}
+  .entry .d{display:block;font-size:.8125rem;color:var(--ink-soft);line-height:1.7}
+  .band{list-style:none;margin:0 0 1rem;padding:0;display:flex;
+        flex-wrap:wrap;gap:.4rem .45rem}
+  .band li{font-size:.8125rem;line-height:1;padding:.5rem .7rem;
+           border:1px dashed var(--rule);color:var(--ink-soft);background:#fff}
+  .note{font-size:.875rem;color:var(--ink-soft)}
+  ul.links{list-style:none;margin:0;padding:0;font-size:.9375rem}
+  ul.links li{margin-bottom:.35rem}
+  footer{margin-top:3rem;padding-top:1.25rem;border-top:1px solid var(--rule);
+         font-size:.8125rem;color:var(--ink-soft)}
+  @media (max-width:30rem){.wrap{padding:2.75rem 1.25rem 2.5rem} .mark{font-size:2rem}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1 class="mark">季節かご</h1>
+  <p class="romaji">kisetsukago</p>
+
+  <p class="lede">
+    暑い日、荒れた日、花粉の多い日。天気や季節の条件ごとに、
+    その時期に売れているものを一覧でまとめて置いておくサイトです。
+  </p>
+
+  <h2>いま見られるページ</h2>
+  <ul class="pages">
+    <li>
+      <a class="entry" href="/kion/">
+        <span class="t">都道府県別の気温</span>
+        <span class="d">気象庁の観測をもとに、47都道府県の代表地点の気温を並べています。夏は高い順、冬は低い順。毎日入れ替わります。</span>
+      </a>
+    </li>
+  </ul>
+
+  <h2>これから増やす予定の条件</h2>
+  <ul class="band">
+    <li>雨量</li><li>風</li><li>湿度</li><li>台風</li>
+    <li>花粉</li><li>黄砂</li><li>紫外線</li><li>雪</li>
+  </ul>
+  <p class="note">条件ごとに1ページずつ用意し、中身を毎日入れ替えていきます。</p>
+
+  <h2>このサイトの位置づけ</h2>
+  <p class="note">
+    当サイトは商品を紹介することを目的としています。気象情報や防災情報を提供するものではなく、
+    避難や安全に関する判断の根拠として使えるものではありません。
+    警報・注意報や避難に関する情報は、必ず下記の公式発表をご確認ください。
+  </p>
+
+  <h2>公式情報</h2>
+  <ul class="links">
+    <li><a href="https://www.jma.go.jp/jma/index.html" rel="noopener">気象庁</a></li>
+    <li><a href="https://www.jma.go.jp/bosai/warning/" rel="noopener">気象庁 警報・注意報</a></li>
+    <li><a href="https://www.jma.go.jp/bosai/map.html" rel="noopener">気象庁 天気予報</a></li>
+    <li><a href="https://www.bousai.go.jp/" rel="noopener">内閣府 防災情報のページ</a></li>
+  </ul>
+  <p class="note">お住まいの自治体が出す避難情報もあわせてご確認ください。</p>
+
+  <footer>
+    当サイトは楽天アフィリエイトを利用した商品紹介を行っています。<br>
+    掲載している価格や在庫は変動するため、最新の情報は各販売ページでご確認ください。
+  </footer>
+
+</div>
+</body>
+</html>
