@@ -2,7 +2,6 @@ name: daily
 
 on:
   schedule:
-    # 毎日 07:20 UTC（米国東部 夏時間 3:20 / 冬時間 2:20、日本時間 16:20）
     - cron: "20 7 * * *"
   workflow_dispatch:
 
@@ -30,11 +29,11 @@ jobs:
         run: |
           git config user.name "kisetsukago-bot"
           git config user.email "301740245+cosmeradar@users.noreply.github.com"
-          if git diff --quiet -- moushou/; then
+          if git diff --quiet -- kion/; then
             echo "内容に変化がないため、公開処理は行いません"
             exit 0
           fi
-          git add moushou/
-          git commit -m "猛暑ページを更新 ($(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M') JST)"
+          git add kion/
+          git commit -m "気温ページを更新"
           git push
           echo "公開しました"
