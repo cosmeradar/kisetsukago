@@ -29,7 +29,7 @@ jobs:
         run: |
           git config user.name "kisetsukago-bot"
           git config user.email "301740245+cosmeradar@users.noreply.github.com"
-          if git diff --quiet -- kion/; then
+          if git add kion/ && git diff --cached --quiet -- kion/; then
             echo "内容に変化がないため、公開処理は行いません"
             exit 0
           fi
