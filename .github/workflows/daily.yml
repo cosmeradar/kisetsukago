@@ -23,17 +23,17 @@ jobs:
           RAKUTEN_APP_ID: ${{ secrets.RAKUTEN_APP_ID }}
           RAKUTEN_ACCESS_KEY: ${{ secrets.RAKUTEN_ACCESS_KEY }}
           RAKUTEN_AFFILIATE_ID: ${{ secrets.RAKUTEN_AFFILIATE_ID }}
-        run: python3 scripts/build2.py
+        run: python3 scripts/build.py
 
       - name: 変更があれば公開する
         run: |
           git config user.name "kisetsukago-bot"
           git config user.email "301740245+cosmeradar@users.noreply.github.com"
-          if git add kion/ && git diff --cached --quiet -- kion/; then
+          git add index.html kion/
+          if git diff --cached --quiet; then
             echo "内容に変化がないため、公開処理は行いません"
             exit 0
           fi
-          git add kion/
-          git commit -m "気温ページを更新"
+          git commit -m "トップページと気温ページを更新"
           git push
           echo "公開しました"
