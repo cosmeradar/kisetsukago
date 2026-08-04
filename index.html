@@ -16,7 +16,7 @@
 <style>
   :root{
     --paper:#FBFAF6; --ink:#1C2A33; --ink-soft:#5A6670;
-    --ai:#2F4E7C; --koke:#6B7F5B; --rule:#E2DFD5;
+    --ai:#2F4E7C; --koke:#6B7F5B; --hi:#B4472B; --cold:#3C6E8F; --rule:#E2DFD5;
     --mincho:"Hiragino Mincho ProN","Yu Mincho","YuMincho","MS PMincho",serif;
     --gothic:"Hiragino Kaku Gothic ProN","Yu Gothic","YuGothic",Meiryo,system-ui,sans-serif;
   }
@@ -24,16 +24,33 @@
   html{-webkit-text-size-adjust:100%}
   body{margin:0;background:var(--paper);color:var(--ink);
        font-family:var(--gothic);font-size:16px;line-height:1.9}
-  .wrap{max-width:38rem;margin:0 auto;padding:4rem 1.5rem 3rem}
   a{color:var(--ai);text-underline-offset:.2em}
   a:focus-visible{outline:2px solid var(--ai);outline-offset:3px}
+  h2{font-size:.75rem;letter-spacing:.2em;color:var(--ink-soft);font-weight:600;
+     margin:0 0 1rem;padding-top:2.25rem;border-top:1px solid var(--rule)}
+  .note{font-size:.875rem;color:var(--ink-soft)}
+  ul.links{list-style:none;margin:0;padding:0;font-size:.9375rem}
+  ul.links li{margin-bottom:.35rem}
+  footer{margin-top:3rem;padding-top:1.25rem;border-top:1px solid var(--rule);
+         font-size:.8125rem;color:var(--ink-soft)}
+  .mapwrap{overflow-x:auto;margin:0 0 .85rem;padding-bottom:.2rem}
+  svg.jmap{display:block;width:100%;height:auto}
+  svg.jmap:not(.mini){min-width:30rem}
+  svg.jmap text{text-anchor:middle;font-family:var(--gothic);fill:var(--ink)}
+  svg.jmap .mn{font-size:11px}
+  svg.jmap .mv{font-size:13px;font-variant-numeric:tabular-nums}
+  svg.jmap a{cursor:pointer}
+  svg.jmap a:hover rect{stroke:var(--ink);stroke-width:1.5}
+  .mapkey{display:flex;align-items:center;gap:.5rem;margin:0 0 .85rem;
+          font-size:.75rem;color:var(--ink-soft);font-variant-numeric:tabular-nums}
+  svg.jkey{height:10px;width:11rem;flex:0 0 auto}
+
+  .wrap{max-width:38rem;margin:0 auto;padding:4rem 1.5rem 3rem}
   .mark{font-family:var(--mincho);font-size:2.5rem;line-height:1.3;
         letter-spacing:.16em;margin:0 0 .6rem;font-weight:400}
   .romaji{font-size:.7rem;letter-spacing:.28em;text-transform:uppercase;
           color:var(--ink-soft);margin:0 0 2.75rem}
   .lede{font-family:var(--mincho);font-size:1.0625rem;margin:0 0 3rem}
-  h2{font-size:.75rem;letter-spacing:.2em;color:var(--ink-soft);font-weight:600;
-     margin:0 0 1rem;padding-top:2.25rem;border-top:1px solid var(--rule)}
   ul.pages{list-style:none;margin:0 0 1rem;padding:0}
   ul.pages li{margin-bottom:.75rem}
   .entry{display:block;text-decoration:none;border:1px solid var(--rule);
@@ -42,15 +59,13 @@
   .entry .t{display:block;font-family:var(--mincho);font-size:1.125rem;
             color:var(--ink);margin-bottom:.15rem}
   .entry .d{display:block;font-size:.8125rem;color:var(--ink-soft);line-height:1.7}
+  .entry .mapwrap{margin:.9rem 0 .6rem}
+  .entry svg.jmap.mini{max-width:15rem;margin:0 auto}
+  .entry .mapkey{margin:0;justify-content:center}
   .band{list-style:none;margin:0 0 1rem;padding:0;display:flex;
         flex-wrap:wrap;gap:.4rem .45rem}
   .band li{font-size:.8125rem;line-height:1;padding:.5rem .7rem;
            border:1px dashed var(--rule);color:var(--ink-soft);background:#fff}
-  .note{font-size:.875rem;color:var(--ink-soft)}
-  ul.links{list-style:none;margin:0;padding:0;font-size:.9375rem}
-  ul.links li{margin-bottom:.35rem}
-  footer{margin-top:3rem;padding-top:1.25rem;border-top:1px solid var(--rule);
-         font-size:.8125rem;color:var(--ink-soft)}
   @media (max-width:30rem){.wrap{padding:2.75rem 1.25rem 2.5rem} .mark{font-size:2rem}}
 </style>
 </head>
@@ -70,7 +85,10 @@
     <li>
       <a class="entry" href="/kion/">
         <span class="t">都道府県別の気温</span>
-        <span class="d">気象庁の観測をもとに、47都道府県の代表地点の気温を並べています。夏は高い順、冬は低い順。毎日入れ替わります。</span>
+        <span class="d">気象庁の観測をもとに、47都道府県の代表地点の気温を並べています。気温の高い順。毎日入れ替わります。</span>
+        <span class="mapwrap"><svg class="jmap mini" viewBox="0 0 232 158" role="img" aria-label="都道府県別の気温を色で表した図"><title>都道府県別の気温を色で表した図</title><rect x="216" y="0" width="16" height="14" rx="2" fill="#E0E4E2"/><rect x="216" y="16" width="16" height="14" rx="2" fill="#D3DEE1"/><rect x="198" y="32" width="16" height="14" rx="2" fill="#E9E9E2"/><rect x="216" y="32" width="16" height="14" rx="2" fill="#CFDCE1"/><rect x="198" y="48" width="16" height="14" rx="2" fill="#ECEAE3"/><rect x="216" y="48" width="16" height="14" rx="2" fill="#CCDBE1"/><rect x="180" y="64" width="16" height="14" rx="2" fill="#EACCBA"/><rect x="198" y="64" width="16" height="14" rx="2" fill="#EAD0BE"/><rect x="216" y="64" width="16" height="14" rx="2" fill="#DAE1E2"/><rect x="72" y="80" width="16" height="14" rx="2" fill="#E9C8B5"/><rect x="90" y="80" width="16" height="14" rx="2" fill="#DD9C7F"/><rect x="108" y="80" width="16" height="14" rx="2" fill="#E3B49C"/><rect x="126" y="80" width="16" height="14" rx="2" fill="#E3B29A"/><rect x="144" y="80" width="16" height="14" rx="2" fill="#E7C3AE"/><rect x="162" y="80" width="16" height="14" rx="2" fill="#E9C8B5"/><rect x="180" y="80" width="16" height="14" rx="2" fill="#BCD3E0"/><rect x="198" y="80" width="16" height="14" rx="2" fill="#D1DDE1"/><rect x="216" y="80" width="16" height="14" rx="2" fill="#E6E7E2"/><rect x="18" y="96" width="16" height="14" rx="2" fill="#D98E6C"/><rect x="36" y="96" width="16" height="14" rx="2" fill="#D98C6A"/><rect x="54" y="96" width="16" height="14" rx="2" fill="#D98C6A"/><rect x="72" y="96" width="16" height="14" rx="2" fill="#E3B49C"/><rect x="90" y="96" width="16" height="14" rx="2" fill="#E1AD93"/><rect x="108" y="96" width="16" height="14" rx="2" fill="#EEDDCE"/><rect x="126" y="96" width="16" height="14" rx="2" fill="#EFE2D5"/><rect x="144" y="96" width="16" height="14" rx="2" fill="#EEDED1"/><rect x="162" y="96" width="16" height="14" rx="2" fill="#ECEAE3"/><rect x="180" y="96" width="16" height="14" rx="2" fill="#EFE2D5"/><rect x="198" y="96" width="16" height="14" rx="2" fill="#DEE3E2"/><rect x="216" y="96" width="16" height="14" rx="2" fill="#EBEAE3"/><rect x="18" y="112" width="16" height="14" rx="2" fill="#DB9575"/><rect x="36" y="112" width="16" height="14" rx="2" fill="#DE9E81"/><rect x="54" y="112" width="16" height="14" rx="2" fill="#E1A98F"/><rect x="72" y="112" width="16" height="14" rx="2" fill="#E9CAB8"/><rect x="90" y="112" width="16" height="14" rx="2" fill="#ECD7C8"/><rect x="108" y="112" width="16" height="14" rx="2" fill="#F2EDE3"/><rect x="126" y="112" width="16" height="14" rx="2" fill="#EEDDCE"/><rect x="144" y="112" width="16" height="14" rx="2" fill="#EAE9E3"/><rect x="162" y="112" width="16" height="14" rx="2" fill="#D5DFE1"/><rect x="180" y="112" width="16" height="14" rx="2" fill="#F0E4D8"/><rect x="198" y="112" width="16" height="14" rx="2" fill="#ECEAE3"/><rect x="216" y="112" width="16" height="14" rx="2" fill="#E8E8E2"/><rect x="18" y="128" width="16" height="14" rx="2" fill="#DC997A"/><rect x="36" y="128" width="16" height="14" rx="2" fill="#E7C3AE"/><rect x="54" y="128" width="16" height="14" rx="2" fill="#EDDBCC"/><rect x="72" y="128" width="16" height="14" rx="2" fill="#EFE2D5"/><rect x="0" y="144" width="16" height="14" rx="2" fill="#E0A78C"/></svg></span>
+        <span class="mapkey"><span>23.1℃</span><svg class="jkey" viewBox="0 0 180 10" role="presentation" aria-hidden="true"><rect x="0" y="0" width="20" height="10" fill="#BCD3E0"/><rect x="20" y="0" width="20" height="10" fill="#CADAE1"/><rect x="40" y="0" width="20" height="10" fill="#D7E0E2"/><rect x="60" y="0" width="20" height="10" fill="#E4E6E2"/><rect x="80" y="0" width="20" height="10" fill="#F2EDE3"/><rect x="100" y="0" width="20" height="10" fill="#ECD5C5"/><rect x="120" y="0" width="20" height="10" fill="#E6BCA6"/><rect x="140" y="0" width="20" height="10" fill="#DFA488"/><rect x="160" y="0" width="20" height="10" fill="#D98C6A"/></svg><span>33.7℃</span></span>
+        <span class="d">観測 2026-08-04 09:50 日本時間／押すと都道府県名と地点名の一覧へ</span>
       </a>
     </li>
   </ul>
@@ -94,9 +112,10 @@
     <li><a href="https://www.jma.go.jp/jma/index.html" rel="noopener">気象庁</a></li>
     <li><a href="https://www.jma.go.jp/bosai/warning/" rel="noopener">気象庁 警報・注意報</a></li>
     <li><a href="https://www.jma.go.jp/bosai/map.html" rel="noopener">気象庁 天気予報</a></li>
+    <li><a href="https://www.wbgt.env.go.jp/" rel="noopener">環境省 熱中症予防情報サイト</a></li>
     <li><a href="https://www.bousai.go.jp/" rel="noopener">内閣府 防災情報のページ</a></li>
   </ul>
-  <p class="note">お住まいの自治体が出す避難情報もあわせてご確認ください。</p>
+  <p class="note">お住まいの自治体が出す情報もあわせてご確認ください。</p>
 
   <footer>
     当サイトは楽天アフィリエイトを利用した商品紹介を行っています。<br>
