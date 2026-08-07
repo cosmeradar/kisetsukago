@@ -1,0 +1,8 @@
+# GitHub Pages（Jekyll）の設定。
+#
+# exclude に書いたものはページ化されず、公開先にも置かれない。
+# CLAUDE.md は Claude Code 向けの作業指示書であり、サイトの一部ではない。
+# 設定を入れる前は https://kisetsukago.com/CLAUDE として誰でも閲覧できていた。
+
+exclude:
+  - CLAUDE.md
