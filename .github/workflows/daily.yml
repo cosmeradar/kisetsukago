@@ -28,7 +28,7 @@ jobs:
       - name: 変更があれば公開する
         run: |
           git config user.name "kisetsukago-bot"
-          git config user.email "301740245+cosmeradar@users.noreply.github.com"
+          git config user.email "contact@kisetsukago.com"
           git add index.html kion/
           if git diff --cached --quiet; then
             echo "内容に変化がないため、公開処理は行いません"
