@@ -3,6 +3,10 @@
 # exclude に書いたものはページ化されず、公開先にも置かれない。
 # CLAUDE.md は Claude Code 向けの作業指示書であり、サイトの一部ではない。
 # 設定を入れる前は https://kisetsukago.com/CLAUDE として誰でも閲覧できていた。
+#
+# scripts/ はページを作るためのプログラム。毎朝の自動実行は GitHub Actions 側で動くため、
+# サイトに置く必要がない。設定を入れる前は https://kisetsukago.com/scripts/build.py で読めていた。
 
 exclude:
   - CLAUDE.md
+  - scripts/
