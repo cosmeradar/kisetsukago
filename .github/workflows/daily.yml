@@ -34,6 +34,6 @@ jobs:
             echo "内容に変化がないため、公開処理は行いません"
             exit 0
           fi
-          git commit -m "トップページと気温ページを更新"
+          git commit -m "トップページと観測項目ページを更新"
           git push
           echo "公開しました"
