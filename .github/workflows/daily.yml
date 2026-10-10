@@ -2,7 +2,10 @@ name: daily
 
 on:
   schedule:
-    - cron: "20 7 * * *"
+    # 3:00 UTC＝日本時間の正午。GitHub の定時実行は数時間遅れることが多く（2026年10月は7時間前後、
+    # いちばん遅い日は12時間）、遅れても日本時間の夜のうちに動くよう早めにしてある。
+    # 日付が変わった直後に動いた日は、build.py が書き換えずに終わる（前の日のページが残る）。
+    - cron: "0 3 * * *"
   workflow_dispatch:
 
 permissions:
@@ -29,11 +32,14 @@ jobs:
         run: |
           git config user.name "kisetsukago-bot"
           git config user.email "contact@kisetsukago.com"
-          git add index.html kion/ uryo/ fusoku/ shitsudo/
+          # まだ一度も書き出されていないページがあっても止まらないよう、あるものだけ登録する
+          for p in index.html sitemap.xml kion uryo fusoku shitsudo danbou koromogae; do
+            if [ -e "$p" ]; then git add "$p"; fi
+          done
           if git diff --cached --quiet; then
             echo "内容に変化がないため、公開処理は行いません"
             exit 0
           fi
-          git commit -m "トップページと観測項目ページを更新"
+          git commit -m "トップページと各ページを更新"
           git push
           echo "公開しました"

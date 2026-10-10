@@ -6,7 +6,10 @@
 #
 # scripts/ はページを作るためのプログラム。毎朝の自動実行は GitHub Actions 側で動くため、
 # サイトに置く必要がない。設定を入れる前は https://kisetsukago.com/scripts/build.py で読めていた。
+#
+# data/ はページを作るための材料（気象庁の平年値）。ページから読み込むものではないので置かない。
 
 exclude:
   - CLAUDE.md
   - scripts/
+  - data/

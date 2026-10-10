@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
-"""観測項目ごとのページと、トップページを組み立てる。
+"""観測項目のページ、平年値の目安のページ、トップページ、sitemap.xml を組み立てる。
 
-いま作るのは気温・雨量・風速・湿度の4ページとトップページ。
-ページごとの違いは METRICS の表にすべて集めてあるので、
-観測項目を増やすときはその表に1つ足す（関数の側は触らない）。
+いま作るのは次の6ページとトップページ。
+- 観測項目のページ（METRICS）: 気温・雨量・風速・湿度
+  気温は気象庁「最新の気象データ」（その日の最高・最低気温と平年差）を使う。
+  雨量・風速・湿度は、アメダスのその時点の観測値を使う。
+- 平年値の目安のページ（GUIDES）: 暖房・衣替え
+  data/heinen.json（県庁所在地などの日別平年値。scripts/make_heinen.py で作る）から、
+  決まった気温を下回る（上回る）日を求め、その日の観測とあわせて載せる。
+ページごとの違いは METRICS と GUIDES の表に集めてあるので、ページを増やすときはそこに1つ足す。
 並び順と商品は季節で切り替える（夏＝4〜9月、冬＝10〜3月）。
 商品は楽天のレビュー件数上位から、日付を種にして日替わりで選ぶ。
 公開前の検査に1つでも引っかかったら何も書かずに終了する。
+日付が変わった直後（日本時間の朝6時より前）に動いたときは、その日の観測が数時間分しかないので、
+何も書かずに終わる（前の日のページがそのまま残る）。
 RAKUTEN_MOCK=1 のときは楽天に接続せず架空データで組み立てる（手元確認用）。
 """
 
+import csv
 import hashlib
 import html
+import io
 import json
 import os
 import random
@@ -20,7 +29,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 
 JST = timezone(timedelta(hours=9))
 
@@ -28,12 +37,19 @@ LATEST_TIME = "https://www.jma.go.jp/bosai/amedas/data/latest_time.txt"
 MAP_TMPL = "https://www.jma.go.jp/bosai/amedas/data/map/{ts}.json"
 STATION_TABLE = "https://www.jma.go.jp/bosai/amedas/const/amedastable.json"
 FORECAST_AREA = "https://www.jma.go.jp/bosai/forecast/const/forecast_area.json"
+# その日の0時からの最高気温・最低気温（全国の観測点）。毎正時に更新される。
+DAILY_MAX_CSV = "https://www.data.jma.go.jp/stats/data/mdrr/tem_rct/alltable/mxtemsadext00_rct.csv"
+DAILY_MIN_CSV = "https://www.data.jma.go.jp/stats/data/mdrr/tem_rct/alltable/mntemsadext00_rct.csv"
 RAKUTEN = "https://openapi.rakuten.co.jp/ichibams/api/IchibaItem/Search/20260701"
 SITE = "https://kisetsukago.com"
 GA_ID = "G-C46GBVZFLL"
 
 OUT_TOP = "index.html"
+OUT_SITEMAP = "sitemap.xml"
+HEINEN_FILE = "data/heinen.json"
 MAX_AGE_MINUTES = 180
+# 日本時間でこれより前に動いたときは、その日の観測が短すぎるので書き換えない
+EARLIEST_HOUR = 6
 
 # 楽天から取る候補数と、その中から見せる数
 POOL_SIZE = 20
@@ -110,8 +126,11 @@ C_WET = (60, 110, 143)
 # ---------- 観測項目の一覧 ----------
 # ページを増やすときは、この表に1つ足す。ページごとの違いはすべてここに集める。
 # 季節で変えたい値は {"summer": ..., "winter": ...} と書く。共通ならそのまま書く。
-#   key       気象庁アメダスの項目名
+#   source    "daily" は「最新の気象データ」（その日の最高・最低）、"snapshot" はアメダスのその時点の値
+#   key       気象庁アメダスの項目名（snapshot のときだけ使う）
+#   h1/title  h1 はページの見出し。title は検索結果に出る題名（読者が打つ語を入れる）
 #   pick      代表地点の選び方。"max" は最も大きい地点、"min" は最も小さい地点
+#             （daily のときは "max" が最高気温の最も高い地点、"min" が最低気温の最も低い地点）
 #   scale     地図の色。("heat",) はその日の最小〜最大でなめらかに割り振る（気温用）。
 #             ("steps", 区切り, 濃い側の色) は決まった段階で塗り分ける
 #   valid     この範囲を外れた値が出たら公開しない
@@ -120,23 +139,24 @@ C_WET = (60, 110, 143)
 METRICS = [
     {
         "id": "kion",
-        "key": "temp",
+        "source": "daily",
         "out": "kion/index.html",
         "path": "/kion/",
         "name": "気温",
-        "title": "都道府県別の気温",
+        "h1": "都道府県別の気温",
+        "title": "都道府県別の気温ランキング（最高気温・最低気温・平年差）｜毎日更新",
         "unit": "℃",
         "digits": 1,
-        "column": "気温",
-        "desc": "気象庁の観測をもとに、都道府県ごとの代表地点の気温を地図と表でまとめています。",
+        "desc": "気象庁の観測をもとに、47都道府県の代表地点のその日の最高気温・最低気温と平年差を、"
+                "地図と表で毎日まとめています。",
         "pick": {"summer": "max", "winter": "min"},
-        "order_label": {"summer": "気温の高い順", "winter": "気温の低い順"},
+        "order_label": {"summer": "最高気温の高い順", "winter": "最低気温の低い順"},
         "scale": ("heat",),
         "valid": (-50.0, 50.0),
         "min_spots": 500,
         "tags": [("ge", 35.0, "35℃以上", "hot"), ("le", 0.0, "0℃以下", "cold")],
-        "tail": "気象庁が天気予報に使う代表地点のみを対象としているため、"
-                "その都道府県の最高気温や最低気温とは限りません。",
+        "tail": "気象庁が天気予報に使う代表地点のうち、各都道府県で最高気温が最も高い"
+                "（冬は最低気温が最も低い）地点の値です。その都道府県で一番高い（低い）値とは限りません。",
         "heading": {"summer": "暑い時期に選ばれているもの",
                     "winter": "寒い時期に選ばれているもの"},
         "keywords": {"summer": ["ハンディファン", "冷感 タオル", "日傘"],
@@ -144,11 +164,13 @@ METRICS = [
     },
     {
         "id": "uryo",
+        "source": "snapshot",
         "key": "precipitation1h",
         "out": "uryo/index.html",
         "path": "/uryo/",
         "name": "雨量",
-        "title": "都道府県別の雨量",
+        "h1": "都道府県別の雨量",
+        "title": "都道府県別の雨量ランキング（1時間雨量）",
         "unit": "mm",
         "digits": 1,
         "column": "1時間雨量",
@@ -166,11 +188,13 @@ METRICS = [
     },
     {
         "id": "fusoku",
+        "source": "snapshot",
         "key": "wind",
         "out": "fusoku/index.html",
         "path": "/fusoku/",
         "name": "風速",
-        "title": "都道府県別の風速",
+        "h1": "都道府県別の風速",
+        "title": "都道府県別の風速ランキング",
         "unit": "m/s",
         "digits": 1,
         "column": "風速",
@@ -188,11 +212,13 @@ METRICS = [
     },
     {
         "id": "shitsudo",
+        "source": "snapshot",
         "key": "humidity",
         "out": "shitsudo/index.html",
         "path": "/shitsudo/",
         "name": "湿度",
-        "title": "都道府県別の湿度",
+        "h1": "都道府県別の湿度",
+        "title": "都道府県別の湿度ランキング",
         "unit": "%",
         "digits": 0,
         "column": "湿度",
@@ -212,10 +238,68 @@ METRICS = [
     },
 ]
 
+# ---------- 平年値の目安のページ ----------
+# 県庁所在地などの日別平年値から、決まった気温を下回る（上回る）日を求めて並べる。
+# 一年中有効なページなので、題名に季節の語を入れてよい（指示書ルール6の例外。2026-10-11 運営者承認）。
+#   element   平年値のどの値を使うか（"tmin" 最低気温 / "tmax" 最高気温）
+#   views     月で切り替える見せ方。dir が "down" なら下回る日、"up" なら上回る日を並べる。
+#             main は地図に塗る気温、order_from はこの日から数えて早い順に並べる、
+#             invert は「早いほど暖かい地域」になる見せ方（地図の色を反対にする）
+GUIDES = [
+    {
+        "id": "danbou",
+        "out": "danbou/index.html",
+        "path": "/danbou/",
+        "name": "暖房",
+        "h1": "暖房はいつから？いつまで？",
+        "title": "暖房はいつから？いつまで？都道府県別の目安（平年の最低気温）",
+        "desc": "気象庁の平年値をもとに、朝の最低気温が15℃・10℃・5℃を下回る時期（春は上回る時期）を"
+                "47都道府県で並べています。その日の最低気温と平年差も毎日入れ替わります。",
+        "element": "tmin",
+        "element_label": "最低気温",
+        "element_text": "朝の最低気温",
+        "views": [
+            {"months": (6, 7, 8, 9, 10, 11, 12), "label": "いつから（秋から冬）", "dir": "down",
+             "thresholds": [15.0, 10.0, 5.0], "main": 10.0, "order_from": (7, 1), "invert": False},
+            {"months": (1, 2, 3, 4, 5), "label": "いつまで（冬から春）", "dir": "up",
+             "thresholds": [5.0, 10.0, 15.0], "main": 10.0, "order_from": (1, 1), "invert": True},
+        ],
+        "note": "暖房を使い始める時期や使い終える時期は、住まいのつくりや体感によって人それぞれです。"
+                "このページは、判断の材料として、決まった気温を下回る（春は上回る）時期を"
+                "平年値から機械的に求めて並べたものです。表の日付は平年の値で、その年の天候によって前後します。",
+        "heading": "暖房の季節に選ばれているもの",
+        "keywords": ["セラミックヒーター", "こたつ", "湯たんぽ"],
+    },
+    {
+        "id": "koromogae",
+        "out": "koromogae/index.html",
+        "path": "/koromogae/",
+        "name": "衣替え",
+        "h1": "衣替えの時期はいつ？",
+        "title": "衣替えの時期はいつ？都道府県別の目安（平年の最高気温）",
+        "desc": "気象庁の平年値をもとに、日中の最高気温が25℃・20℃・15℃を下回る時期（春は上回る時期）を"
+                "47都道府県で並べています。その日の最高気温と平年差も毎日入れ替わります。",
+        "element": "tmax",
+        "element_label": "最高気温",
+        "element_text": "日中の最高気温",
+        "views": [
+            {"months": (8, 9, 10, 11, 12, 1), "label": "秋から冬", "dir": "down",
+             "thresholds": [25.0, 20.0, 15.0], "main": 20.0, "order_from": (7, 1), "invert": False},
+            {"months": (2, 3, 4, 5, 6, 7), "label": "春から夏", "dir": "up",
+             "thresholds": [15.0, 20.0, 25.0], "main": 20.0, "order_from": (1, 1), "invert": True},
+        ],
+        "note": "衣替えをする時期は、学校や職場の決まりや体感によっても変わります。"
+                "このページは、判断の材料として、決まった気温を下回る（春は上回る）時期を"
+                "平年値から機械的に求めて並べたものです。表の日付は平年の値で、その年の天候によって前後します。",
+        "heading": "衣替えの時期に選ばれているもの",
+        "keywords": ["衣装ケース", "布団圧縮袋", "防虫剤 衣類"],
+    },
+]
+
 
 # ---------- 取得 ----------
 
-def get(url, as_json=True, headers=None, tries=4):
+def get(url, as_json=True, headers=None, tries=4, encoding="utf-8"):
     """取得する。混雑や一時的な不調なら間を空けて数回試す。"""
     h = {"User-Agent": "kisetsukago/0.1"}
     h.update(headers or {})
@@ -224,7 +308,7 @@ def get(url, as_json=True, headers=None, tries=4):
         try:
             req = urllib.request.Request(url, headers=h)
             with urllib.request.urlopen(req, timeout=30) as r:
-                raw = r.read().decode("utf-8")
+                raw = r.read().decode(encoding)
             return json.loads(raw) if as_json else raw.strip()
         except urllib.error.HTTPError as err:
             last = err
@@ -253,6 +337,66 @@ def fetch_weather():
     table = get(STATION_TABLE)
     area = get(FORECAST_AREA)
     return obs_at, obs, table, area
+
+
+def to_float(text):
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def parse_daily_csv(text, kind):
+    """「最新の気象データ」のCSV（その日の最高気温か最低気温）を読む。
+
+    返すのは {観測所番号: {"name", "val", "diff"}} と、データの時刻（日本時間）。
+    品質情報が 0（観測していない）・1（欠測）・2（疑問値）の値は使わない。
+    1日の途中は「資料不足値」（品質情報4）になるが、それは0時からその時刻までの値として使う。
+    """
+    rows = list(csv.reader(io.StringIO(text)))
+    head = rows[0] if rows else []
+    want = "最高気温(℃)" if kind == "max" else "最低気温(℃)"
+    if len(head) < 16 or not head[9].endswith(want) or head[14] != "平年差（℃）":
+        raise ValueError(f"{want}のCSVの形が想定と違います: {head[:16]}")
+    out, times = {}, {}
+    for r in rows[1:]:
+        if len(r) < 16 or not r[0].strip():
+            continue
+        try:
+            at = datetime(int(r[4]), int(r[5]), int(r[6]), int(r[7]), int(r[8]), tzinfo=JST)
+        except ValueError:
+            continue
+        times[at] = times.get(at, 0) + 1
+        v = to_float(r[9])
+        if r[10].strip() in ("0", "1", "2"):
+            v = None
+        out[r[0].strip()] = {"name": r[2].split("（")[0].strip(), "val": v,
+                             "diff": to_float(r[14]) if v is not None else None}
+    if not times:
+        raise ValueError(f"{want}のCSVに観測がありません")
+    return out, max(times, key=times.get)
+
+
+def fetch_daily():
+    """その日の最高気温・最低気温（全国の観測点）を、観測所番号ごとにまとめる。"""
+    hi, at_hi = parse_daily_csv(get(DAILY_MAX_CSV, as_json=False, encoding="cp932"), "max")
+    lo, at_lo = parse_daily_csv(get(DAILY_MIN_CSV, as_json=False, encoding="cp932"), "min")
+    daily = {}
+    for code in set(hi) | set(lo):
+        h, l = hi.get(code, {}), lo.get(code, {})
+        daily[code] = {"name": h.get("name") or l.get("name"),
+                       "max": h.get("val"), "max_diff": h.get("diff"),
+                       "min": l.get("val"), "min_diff": l.get("diff")}
+    # 2つのCSVの時刻がずれていたら、早いほうを「ここまでの観測」とする
+    return min(at_hi, at_lo), daily
+
+
+def load_heinen():
+    with open(HEINEN_FILE, encoding="utf-8") as f:
+        return json.load(f)
 
 
 def mock_pool(keyword):
@@ -336,6 +480,10 @@ def fmt(metric, v):
     return f"{v:.{metric['digits']}f}"
 
 
+def fmt_diff(v):
+    return "—" if v is None else f"{v:+.1f}"
+
+
 def stations_by_pref(forecast_area):
     out = {}
     for office, areas in forecast_area.items():
@@ -354,6 +502,16 @@ def tag_of(metric, v):
         if (how == "ge" and v >= edge) or (how == "le" and v <= edge):
             return (label, cls)
     return None
+
+
+def sort_rows(rows, want_high):
+    if want_high:
+        rows.sort(key=lambda r: (r["val"] is None, -(r["val"] or 0), r["pref"]))
+    else:
+        rows.sort(key=lambda r: (r["val"] is None,
+                                 r["val"] if r["val"] is not None else float("inf"),
+                                 r["pref"]))
+    return rows
 
 
 def summarize(by_pref, obs, table, metric, season):
@@ -375,13 +533,37 @@ def summarize(by_pref, obs, table, metric, season):
             "spot": best["spot"] if best else None,
             "tag": tag_of(metric, best["val"]) if best else None,
         })
-    if want_high:
-        rows.sort(key=lambda r: (r["val"] is None, -(r["val"] or 0), r["pref"]))
-    else:
-        rows.sort(key=lambda r: (r["val"] is None,
-                                 r["val"] if r["val"] is not None else float("inf"),
-                                 r["pref"]))
-    return rows
+    return sort_rows(rows, want_high)
+
+
+def summarize_daily(by_pref, daily, table, metric, season):
+    """その日の最高・最低気温で、都道府県ごとに代表地点を1つ選ぶ。
+
+    夏は最高気温が最も高い地点、冬は最低気温が最も低い地点。その地点の最高・最低を両方載せる。
+    """
+    want_high = by_season(metric["pick"], season) == "max"
+    side = "max" if want_high else "min"
+    rows = []
+    for pref, codes in by_pref.items():
+        best = None
+        for code in codes:
+            d = daily.get(code)
+            if not d or d[side] is None:
+                continue
+            if best is None or (d[side] > best[side] if want_high else d[side] < best[side]):
+                best = dict(d, code=code)
+        row = {"pref": pref, "val": None, "spot": None, "tag": None,
+               "max": None, "max_diff": None, "min": None, "min_diff": None}
+        if best:
+            row.update({
+                "val": best[side],
+                "spot": table.get(best["code"], {}).get("kjName") or best["name"] or best["code"],
+                "tag": tag_of(metric, best[side]),
+                "max": best["max"], "max_diff": best["max_diff"],
+                "min": best["min"], "min_diff": best["min_diff"],
+            })
+        rows.append(row)
+    return sort_rows(rows, want_high)
 
 
 def value_range(rows):
@@ -389,6 +571,148 @@ def value_range(rows):
     if not got:
         return 0.0, 0.0
     return min(got), max(got)
+
+
+# ---------- 平年値 ----------
+
+LEAP = 2024  # 平年値は2月29日を含む366日の並び。うるう年の暦で数える
+
+
+def day_index(month, day):
+    """月日を、1月1日を0とした通し番号にする（2月29日を含む366日）。"""
+    return (date(LEAP, month, day) - date(LEAP, 1, 1)).days
+
+
+def md_of(i):
+    d = date(LEAP, 1, 1) + timedelta(days=i % 366)
+    return d.month, d.day
+
+
+def md_text(i):
+    m, d = md_of(i)
+    return f"{m}月{d}日"
+
+
+def crossing(series, threshold, direction):
+    """平年値の並びから、決まった気温を下回る（上回る）最初の日の通し番号を返す。
+
+    下回る（down）は一年で最も高い日から、上回る（up）は一年で最も低い日から数え始める。
+    一年を通して下回らない（上回らない）とき、または一年中下回っている（上回っている）ときは None。
+    """
+    n = len(series)
+    if direction == "down":
+        start = max(range(n), key=lambda i: series[i])
+        if series[start] < threshold:
+            return None
+        hit = lambda v: v < threshold  # noqa: E731
+    else:
+        start = min(range(n), key=lambda i: series[i])
+        if series[start] > threshold:
+            return None
+        hit = lambda v: v > threshold  # noqa: E731
+    for k in range(1, n):
+        i = (start + k) % n
+        if hit(series[i]):
+            return i
+    return None
+
+
+def view_of(guide, month):
+    for v in guide["views"]:
+        if month in v["months"]:
+            return v
+    raise ValueError(f"{guide['name']}: {month}月の見せ方が決まっていません")
+
+
+def summarize_guide(guide, view, heinen, daily, day):
+    """平年値から、決まった気温を下回る（上回る）日を都道府県ごとに求める。その日の観測も添える。"""
+    base = day_index(*view["order_from"])
+    today = day_index(day.month, day.day)
+    side = "min" if guide["element"] == "tmin" else "max"
+    rows = []
+    for code, pref in PREF.items():
+        st = heinen["stations"][code]
+        series = st[guide["element"]]
+        dates = {t: crossing(series, t, view["dir"]) for t in view["thresholds"]}
+        main_i = dates[view["main"]]
+        key = (main_i - base) % 366 if main_i is not None else None
+        obs = daily.get(st["amedas"], {})
+        val = obs.get(side)
+        normal = series[today]
+        diff = obs.get(side + "_diff")
+        if val is not None and diff is None:
+            diff = round(val - normal, 1)  # 気象庁が平年差を出す前は、同じ平年値から求める
+        label = "—"
+        if main_i is not None:
+            m, d = md_of(main_i)
+            label = f"{m}/{d}"
+        rows.append({
+            "pref": pref, "code": code, "spot": st["name"], "dates": dates, "key": key,
+            "val": None if key is None else (-key if view["invert"] else key),
+            "label": label,
+            "lowest": min(series), "highest": max(series),
+            "today": val, "normal": normal, "diff": diff,
+        })
+    rows.sort(key=lambda r: (r["key"] is None, r["key"] if r["key"] is not None else 0, r["code"]))
+    return rows
+
+
+def guide_map_metric(guide, view):
+    """地図の部品に渡すための設定。色は「その日の最小〜最大」と同じ割り振り方を使う。"""
+    verb = "下回る" if view["dir"] == "down" else "上回る"
+    return {"name": f"{guide['element_label']}が{view['main']:g}℃を{verb}日",
+            "scale": ("heat",), "digits": 0, "unit": ""}
+
+
+def guide_legend(view, rows):
+    got = [r for r in rows if r["key"] is not None]
+    if not got:
+        return "", ""
+    early = md_text(got[0]["dates"][view["main"]])
+    late = md_text(got[-1]["dates"][view["main"]])
+    return (late, early) if view["invert"] else (early, late)
+
+
+def never_text(view, row, t):
+    """平年では決まった気温を下回らない（上回らない）都道府県の言い方。"""
+    if view["dir"] == "down":
+        if row["highest"] < t:
+            return f"一年を通して{t:g}℃を下回っています"
+        return f"{t:g}℃を下回りません"
+    if row["lowest"] > t:
+        return f"一年を通して{t:g}℃を上回っています"
+    return f"{t:g}℃を上回りません"
+
+
+def guide_summary(guide, view, rows):
+    """表の早い地域と遅い地域、東京を、ひとことで。"""
+    t = view["main"]
+    verb = "下回る" if view["dir"] == "down" else "上回る"
+    got = [r for r in rows if r["key"] is not None]
+    if not got:
+        return ""
+    first, last = got[0], got[-1]
+    text = (f"平年の{guide['element_label']}が{t:g}℃を{verb}のは、"
+            f"早い{first['pref']}（{first['spot']}）で{md_text(first['dates'][t])}ごろ、"
+            f"遅い{last['pref']}（{last['spot']}）で{md_text(last['dates'][t])}ごろです。")
+    tokyo = next(r for r in rows if r["code"] == "13")
+    if tokyo["key"] is not None:
+        text += f"東京都（東京）は{md_text(tokyo['dates'][t])}ごろです。"
+    groups = {}
+    for r in rows:
+        if r["key"] is None:
+            groups.setdefault(never_text(view, r, t), []).append(f"{r['pref']}（{r['spot']}）")
+    for reason, names in groups.items():
+        text += f"{'・'.join(names)}は、平年では{reason}。"
+    return text
+
+
+def guide_prose(guide, view, rows):
+    temps = "・".join(f"{t:g}℃" for t in view["thresholds"])
+    verb = "下回る" if view["dir"] == "down" else "上回る"
+    return (f"気象庁の平年値（1991〜2020年の平均）をもとに、{guide['element_text']}が{temps}を"
+            f"{verb}時期を、都道府県ごとに並べています。{guide_summary(guide, view, rows)}"
+            f"{guide['note']}")
 
 
 # ---------- 地図 ----------
@@ -439,7 +763,10 @@ def color_of(metric, v, low, high):
 
 
 def japan_map_svg(rows, metric, low, high, mini=False):
-    """マス目の日本地図。mini は色だけの小さい版（トップページ用）。"""
+    """マス目の日本地図。mini は色だけの小さい版（トップページ用）。
+
+    行に "label" があればマス目の数字の代わりにそれを書く（平年値の目安のページの日付）。
+    """
     e = html.escape
     by_name = {r["pref"]: r for r in rows}
     if mini:
@@ -461,13 +788,16 @@ def japan_map_svg(rows, metric, low, high, mini=False):
         )
         if mini:
             continue
-        label = fmt(metric, v) if v is not None else "—"
+        if "label" in rec:
+            label = rec["label"]
+        else:
+            label = fmt(metric, v) if v is not None else "—"
         cx = x + cw // 2
         parts.append(
             f'<a href="#p{PREF_CODE[name]}">'
             f'<rect x="{x}" y="{y}" width="{cw}" height="{ch}" rx="{rx}" fill="transparent"/>'
             f'<text class="mn" x="{cx}" y="{y + 16}">{e(short_pref(name))}</text>'
-            f'<text class="mv" x="{cx}" y="{y + 32}">{label}</text>'
+            f'<text class="mv" x="{cx}" y="{y + 32}">{e(label)}</text>'
             "</a>"
         )
 
@@ -509,14 +839,19 @@ def legend_labels(metric, low, high):
 
 # ---------- 検査 ----------
 
-def run_checks(results, items, age, obs, by_pref, proses):
+def run_checks(ctx):
     """1つでも引っかかったら、どのページも書き換えずに終わる。
 
-    results / items / proses は観測項目のidを鍵にした辞書。
+    ctx には集計結果・商品・本文などをまとめて渡す（main を参照）。
     """
     problems = []
-    if age > MAX_AGE_MINUTES:
-        problems.append(f"データが古い（{age:.0f}分前）")
+    now = ctx["now"]
+    if ctx["age"] > MAX_AGE_MINUTES:
+        problems.append(f"アメダスのデータが古い（{ctx['age']:.0f}分前）")
+    daily_age = (now - ctx["daily_at"]).total_seconds() / 60
+    if daily_age > MAX_AGE_MINUTES:
+        problems.append(f"その日の最高・最低気温のデータが古い（{daily_age:.0f}分前）")
+    by_pref = ctx["by_pref"]
     if len(by_pref) != 47:
         problems.append(f"都道府県が47にならない（{len(by_pref)}）")
 
@@ -529,21 +864,52 @@ def run_checks(results, items, age, obs, by_pref, proses):
     if len(placed) != len(set(placed)):
         problems.append("地図のマス目が同じ位置に重なっている")
 
+    obs, daily = ctx["obs"], ctx["daily"]
     for m in METRICS:
         name = m["name"]
-        rows = results[m["id"]]
-        got = sum(1 for e in obs.values() if value_of(e, m["key"]) is not None)
+        rows = ctx["results"][m["id"]]
+        lo, hi = m["valid"]
+        if m["source"] == "daily":
+            got = sum(1 for d in daily.values() if d["max"] is not None and d["min"] is not None)
+            for r in rows:
+                for v in (r["max"], r["min"]):
+                    if v is not None and not (lo <= v <= hi):
+                        problems.append(f"{name}が異常値: {r['pref']} {v}")
+        else:
+            got = sum(1 for e in obs.values() if value_of(e, m["key"]) is not None)
+            for r in rows:
+                if r["val"] is not None and not (lo <= r["val"] <= hi):
+                    problems.append(f"{name}が異常値: {r['pref']} {r['val']}")
         if got < m["min_spots"]:
             problems.append(f"{name}が取れている地点が少なすぎる（{got}）")
         missing = [r["pref"] for r in rows if r["val"] is None]
         if len(missing) > 5:
             problems.append(f"{name}が取れない県が多い（{len(missing)}）")
-        lo, hi = m["valid"]
-        for r in rows:
-            if r["val"] is not None and not (lo <= r["val"] <= hi):
-                problems.append(f"{name}が異常値: {r['pref']} {r['val']}")
 
-        group = items[m["id"]]
+    heinen = ctx["heinen"]
+    stations = heinen.get("stations", {})
+    if set(stations) != set(PREF):
+        problems.append(f"平年値の地点が47都道府県とそろわない（{len(stations)}）")
+    for code, st in stations.items():
+        for k in ("tmax", "tmin"):
+            vals = st.get(k) or []
+            if len(vals) != 366 or not all(-30.0 <= v <= 40.0 for v in vals):
+                problems.append(f"平年値がおかしい: {st.get('name')} {k}")
+    for g in GUIDES:
+        rows = ctx["guides"][g["id"]]
+        dated = sum(1 for r in rows if r["key"] is not None)
+        if dated < 40:
+            problems.append(f"{g['name']}の目安の日が求められた県が少ない（{dated}）")
+        seen = sum(1 for r in rows if r["today"] is not None)
+        if seen < 40:
+            problems.append(f"{g['name']}のページのその日の観測が取れた県が少ない（{seen}）")
+        for r in rows:
+            if r["today"] is not None and not (-50.0 <= r["today"] <= 50.0):
+                problems.append(f"{g['name']}のページの観測が異常値: {r['pref']} {r['today']}")
+
+    for page in METRICS + GUIDES:
+        name = page["name"]
+        group = ctx["items"][page["id"]]
         if not group:
             problems.append(f"{name}のページの商品が0件")
         for it in group:
@@ -552,7 +918,7 @@ def run_checks(results, items, age, obs, by_pref, proses):
             if not isinstance(it["price"], int) or it["price"] <= 0:
                 problems.append(f"価格が不正: {it['name'][:20]}")
         for word in BANNED:
-            if word in proses[m["id"]]:
+            if word in ctx["proses"][page["id"]]:
                 problems.append(f"禁止表現が{name}の本文にある: {word}")
     return problems
 
@@ -617,6 +983,12 @@ CSS_KION = CSS_COMMON + """
   .tag{font-size:.75rem;letter-spacing:.06em;margin-left:.3rem}
   .tag.hot{color:var(--hi)}
   .tag.cold{color:var(--cold)}
+  table.cols th[scope=row]{width:auto}
+  table.cols th[scope=col]{font-size:.8125rem;font-weight:600;white-space:nowrap}
+  table.cols td{font-variant-numeric:tabular-nums;white-space:nowrap}
+  table.cols caption{caption-side:top;text-align:left;font-size:.8125rem;
+                     color:var(--ink-soft);padding:0 0 .5rem}
+  .sub{display:block;font-size:.75rem;color:var(--ink-soft);line-height:1.5}
   h3.kw{font-size:.875rem;font-weight:600;margin:0 0 .75rem}
   h3.kw::before{content:"／ ";color:var(--koke)}
   ul.grid{list-style:none;margin:0 0 2rem;padding:0;display:grid;gap:1.5rem 1rem;
@@ -628,7 +1000,8 @@ CSS_KION = CSS_COMMON + """
          -webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
   .price{display:block;font-size:.875rem;margin-top:.25rem}
   .rev,.shop{display:block;font-size:.75rem;color:var(--ink-soft)}
-  @media (max-width:30rem){.wrap{padding:2.25rem 1.25rem} h1{font-size:1.625rem}}
+  @media (max-width:30rem){.wrap{padding:2.25rem 1rem} h1{font-size:1.625rem}
+    table.cols{font-size:.875rem} table.cols th,table.cols td{padding:.4rem .3rem}}
 """
 
 CSS_TOP = CSS_COMMON + """
@@ -666,18 +1039,45 @@ OFFICIAL_LINKS = """  <h2>公式情報</h2>
   </ul>
   <p class="note">お住まいの自治体が出す情報もあわせてご確認ください。</p>"""
 
+ITEMS_NOTE = ("楽天市場でレビュー件数の多い商品の中から選んで表示しています。商品名は各店舗が登録したものを"
+              "そのままにしています。価格・在庫は変動するため、最新の情報は各商品ページでご確認ください。")
+
+PLACE_NOTE = ("当サイトは商品を紹介することを目的としています。気象情報や防災情報を提供するものではなく、"
+              "健康や安全に関する判断の根拠として使えるものではありません。気象に関する情報や警戒の呼びかけは、"
+              "下記の公式発表をご確認ください。")
+
 
 # ---------- 組み立て ----------
 
-def stamp_date(obs_at):
+def stamp_date(at):
     """「2026年8月8日 08:30」の形。%-m は Windows では使えないので数字を組み立てる。"""
-    return f"{obs_at.year}年{obs_at.month}月{obs_at.day}日 {obs_at:%H:%M}"
+    return f"{at.year}年{at.month}月{at.day}日 {at:%H:%M}"
 
 
-def prose_text(obs_at, metric, season, rows):
+def day_text(at):
+    return f"{at.year}年{at.month}月{at.day}日"
+
+
+def hm_text(at):
+    """「7時」「7時30分」の形。「最新の気象データ」は毎正時なので、ふつうは「◯時」になる。"""
+    return f"{at.hour}時" if at.minute == 0 else f"{at.hour}時{at.minute:02d}分"
+
+
+def prose_text(obs_at, metric, season, rows, daily_at):
     """毎日変わるのは日時と数字だけ。言い回しは固定。"""
     low, high = value_range(rows)
     unit = metric["unit"]
+    if metric["source"] == "daily":
+        which = "最高気温" if by_season(metric["pick"], season) == "max" else "最低気温"
+        span = ""
+        if any(r["val"] is not None for r in rows):
+            span = (f"全国の代表地点の{which}は{fmt(metric, low)}{unit}から"
+                    f"{fmt(metric, high)}{unit}までの幅がありました。")
+        return (
+            f"{day_text(daily_at)}（日本時間）の0時から{hm_text(daily_at)}までの気象庁の観測をもとに、"
+            f"都道府県ごとの最高気温と最低気温を{by_season(metric['order_label'], season)}に並べています。"
+            f"{span}地図の色はこの幅にあわせて自動で割り振っています。{metric['tail']}"
+        )
     span = ""
     if any(r["val"] is not None for r in rows):
         span = (f"全国の代表地点では{fmt(metric, low)}{unit}から"
@@ -693,34 +1093,13 @@ def prose_text(obs_at, metric, season, rows):
     )
 
 
-def render_page(obs_at, metric, rows, items, prose, season):
+def items_html(keywords, items):
     e = html.escape
-    low, high = value_range(rows)
-    unit = metric["unit"]
-    order_label = by_season(metric["order_label"], season)
-    key_left, key_right = legend_labels(metric, low, high)
-
-    table_html = []
-    for r in rows:
-        if r["val"] is None:
-            cells = '<td class="t">—</td><td class="s">データなし</td>'
-        else:
-            mark = ""
-            if r["tag"]:
-                label, cls = r["tag"]
-                mark = f' <span class="tag {cls}">{label}</span>'
-            cells = (f'<td class="t">{fmt(metric, r["val"])}{unit}{mark}</td>'
-                     f'<td class="s">{e(r["spot"])}</td>')
-        pid = PREF_CODE.get(r["pref"], "")
-        table_html.append(
-            f'<tr id="p{pid}"><th scope="row">{e(r["pref"])}</th>{cells}</tr>')
-
     groups = {}
     for it in items:
         groups.setdefault(it["keyword"], []).append(it)
-
     sections = []
-    for kw in by_season(metric["keywords"], season):
+    for kw in keywords:
         group = groups.get(kw, [])
         if not group:
             continue
@@ -739,19 +1118,27 @@ def render_page(obs_at, metric, rows, items, prose, season):
                 "</li>"
             )
         sections.append(f'<h3 class="kw">{e(kw)}</h3><ul class="grid">{"".join(cards)}</ul>')
+    return "".join(sections)
 
-    others = "".join(f'<li><a href="{o["path"]}">{o["title"]}</a></li>'
-                     for o in METRICS if o["id"] != metric["id"])
 
+def other_links(current_id):
+    pages = METRICS + GUIDES
+    return "".join(f'<li><a href="{p["path"]}">{p["h1"]}</a></li>'
+                   for p in pages if p["id"] != current_id)
+
+
+def page_html(page, body):
+    """観測項目のページと平年値の目安のページで共通の外側。"""
+    e = html.escape
     return f"""<!DOCTYPE html>
 <html lang="ja">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 {GA}
-<title>{metric['title']}｜季節かご</title>
-<meta name="description" content="{metric['desc']}">
-<link rel="canonical" href="{SITE}{metric['path']}">
+<title>{e(page['title'])}｜季節かご</title>
+<meta name="description" content="{e(page['desc'])}">
+<link rel="canonical" href="{SITE}{page['path']}">
 <style>{CSS_KION}</style>
 </head>
 <body>
@@ -759,34 +1146,13 @@ def render_page(obs_at, metric, rows, items, prose, season):
 
   <p class="home"><a href="/">季節かご</a></p>
 
-  <h1>{metric['title']}</h1>
-  <p class="stamp">観測 {obs_at:%Y-%m-%d %H:%M} 日本時間／{order_label}／{fmt(metric, low)}〜{fmt(metric, high)}{unit}</p>
-
-  <p class="lede">{e(prose)}</p>
-
-  <h2>全国の分布</h2>
-  <div class="mapwrap">{japan_map_svg(rows, metric, low, high)}</div>
-  <p class="mapkey"><span>{key_left}</span>{legend_svg(metric, low, high)}<span>{key_right}</span></p>
-  <p class="note">都道府県をおおよその位置に並べたもので、実際の面積や形とは異なります。マス目を押すと<a href="#hyou">下の表</a>の該当する行に移動します。</p>
-
-  <h2 id="hyou">都道府県別 代表地点の{metric['name']}</h2>
-  <table>
-    <thead><tr><th scope="col">都道府県</th><th scope="col">{metric['column']}</th><th scope="col">地点</th></tr></thead>
-    <tbody>
-      {"".join(table_html)}
-    </tbody>
-  </table>
-  <p class="note">気象庁が公開しているアメダスの観測値をもとにしています。10分ごとに更新される値のうち、上に記した時刻のものです。</p>
-
-  <h2>{e(by_season(metric['heading'], season))}</h2>
-  {"".join(sections)}
-  <p class="note">楽天市場でレビュー件数の多い商品の中から選んで表示しています。商品名は各店舗が登録したものをそのままにしています。価格・在庫は変動するため、最新の情報は各商品ページでご確認ください。</p>
-
-  <h2>ほかの観測項目</h2>
-  <ul class="links">{others}</ul>
+  <h1>{e(page['h1'])}</h1>
+{body}
+  <h2>ほかのページ</h2>
+  <ul class="links">{other_links(page['id'])}</ul>
 
   <h2>このページの位置づけ</h2>
-  <p class="note">当サイトは商品を紹介することを目的としています。気象情報や防災情報を提供するものではなく、健康や安全に関する判断の根拠として使えるものではありません。気象に関する情報や警戒の呼びかけは、下記の公式発表をご確認ください。</p>
+  <p class="note">{PLACE_NOTE}</p>
 
 {OFFICIAL_LINKS}
 
@@ -801,19 +1167,193 @@ def render_page(obs_at, metric, rows, items, prose, season):
 """
 
 
-def render_top(obs_at, results, season):
+def render_page(obs_at, metric, rows, items, prose, season, daily_at):
+    e = html.escape
+    low, high = value_range(rows)
+    unit = metric["unit"]
+    order_label = by_season(metric["order_label"], season)
+    key_left, key_right = legend_labels(metric, low, high)
+
+    table_html = []
+    if metric["source"] == "daily":
+        for r in rows:
+            pid = PREF_CODE.get(r["pref"], "")
+            if r["val"] is None:
+                cells = '<td>—</td><td>—</td><td class="s">データなし</td>'
+            else:
+                mark = ""
+                if r["tag"]:
+                    label, cls = r["tag"]
+                    mark = f' <span class="tag {cls}">{label}</span>'
+                hi_mark = mark if r["val"] == r["max"] else ""
+                lo_mark = mark if r["val"] == r["min"] and not hi_mark else ""
+
+                def cell(v, diff, extra):
+                    if v is None:
+                        return "<td>—</td>"
+                    return (f'<td>{fmt(metric, v)}{unit}{extra}'
+                            f'<span class="sub">平年差 {fmt_diff(diff)}</span></td>')
+                cells = (cell(r["max"], r["max_diff"], hi_mark) + cell(r["min"], r["min_diff"], lo_mark)
+                         + f'<td class="s">{e(r["spot"])}</td>')
+            table_html.append(f'<tr id="p{pid}"><th scope="row">{e(r["pref"])}</th>{cells}</tr>')
+        table = f"""  <table class="cols">
+    <thead><tr><th scope="col">都道府県</th><th scope="col">最高気温</th><th scope="col">最低気温</th><th scope="col">地点</th></tr></thead>
+    <tbody>
+      {"".join(table_html)}
+    </tbody>
+  </table>
+  <p class="note">気象庁の「最新の気象データ」をもとにしています。その日の0時から、上に記した時刻までの最高気温・最低気温です。平年差は、その地点のその日の平年値との差（気象庁の発表値）で、まだ発表されていないものは「—」としています。</p>"""
+        stamp = (f"観測 {daily_at:%Y-%m-%d} 0時〜{hm_text(daily_at)} 日本時間／{order_label}／"
+                 f"{fmt(metric, low)}〜{fmt(metric, high)}{unit}")
+        table_heading = "都道府県別 代表地点の最高気温・最低気温"
+    else:
+        for r in rows:
+            if r["val"] is None:
+                cells = '<td class="t">—</td><td class="s">データなし</td>'
+            else:
+                mark = ""
+                if r["tag"]:
+                    label, cls = r["tag"]
+                    mark = f' <span class="tag {cls}">{label}</span>'
+                cells = (f'<td class="t">{fmt(metric, r["val"])}{unit}{mark}</td>'
+                         f'<td class="s">{e(r["spot"])}</td>')
+            pid = PREF_CODE.get(r["pref"], "")
+            table_html.append(
+                f'<tr id="p{pid}"><th scope="row">{e(r["pref"])}</th>{cells}</tr>')
+        table = f"""  <table>
+    <thead><tr><th scope="col">都道府県</th><th scope="col">{metric['column']}</th><th scope="col">地点</th></tr></thead>
+    <tbody>
+      {"".join(table_html)}
+    </tbody>
+  </table>
+  <p class="note">気象庁が公開しているアメダスの観測値をもとにしています。10分ごとに更新される値のうち、上に記した時刻のものです。</p>"""
+        stamp = (f"観測 {obs_at:%Y-%m-%d %H:%M} 日本時間／{order_label}／"
+                 f"{fmt(metric, low)}〜{fmt(metric, high)}{unit}")
+        table_heading = f"都道府県別 代表地点の{metric['name']}"
+
+    body = f"""  <p class="stamp">{stamp}</p>
+
+  <p class="lede">{e(prose)}</p>
+
+  <h2>全国の分布</h2>
+  <div class="mapwrap">{japan_map_svg(rows, metric, low, high)}</div>
+  <p class="mapkey"><span>{key_left}</span>{legend_svg(metric, low, high)}<span>{key_right}</span></p>
+  <p class="note">都道府県をおおよその位置に並べたもので、実際の面積や形とは異なります。マス目を押すと<a href="#hyou">下の表</a>の該当する行に移動します。</p>
+
+  <h2 id="hyou">{table_heading}</h2>
+{table}
+
+  <h2>{e(by_season(metric['heading'], season))}</h2>
+  {items_html(by_season(metric['keywords'], season), items)}
+  <p class="note">{ITEMS_NOTE}</p>
+"""
+    return page_html(metric, body)
+
+
+def render_guide(guide, view, rows, items, prose, daily_at, heinen):
+    e = html.escape
+    pm = guide_map_metric(guide, view)
+    got = [r["val"] for r in rows if r["val"] is not None]
+    low, high = (min(got), max(got)) if got else (0.0, 0.0)
+    key_left, key_right = guide_legend(view, rows)
+    verb = "下回る" if view["dir"] == "down" else "上回る"
+    elem = guide["element_label"]
+
+    head = "".join(f'<th scope="col">{t:g}℃</th>' for t in view["thresholds"])
+    date_rows = []
+    for r in rows:
+        cells = "".join(
+            f"<td>{md_text(r['dates'][t]) if r['dates'][t] is not None else '—'}</td>"
+            for t in view["thresholds"])
+        date_rows.append(
+            f'<tr id="p{r["code"]}"><th scope="row">{e(r["pref"])}'
+            f'<span class="sub">{e(r["spot"])}</span></th>{cells}</tr>')
+
+    today_rows = []
+    for r in sorted(rows, key=lambda r: r["code"]):
+        val = f"{r['today']:.1f}℃" if r["today"] is not None else "—"
+        today_rows.append(
+            f'<tr><th scope="row">{e(r["pref"])}<span class="sub">{e(r["spot"])}</span></th>'
+            f"<td>{val}</td><td>{r['normal']:.1f}℃</td><td>{fmt_diff(r['diff'])}</td></tr>")
+
+    nevers = [r for r in rows if r["dates"][view["main"]] is None]
+    never_note = ""
+    if nevers:
+        never_note = ("地図で「—」の都道府県は、平年では"
+                      f"{view['main']:g}℃を{verb}日がないところです。")
+
+    body = f"""  <p class="stamp">平年値 1991〜2020年／{e(view['label'])}／観測 {daily_at:%Y-%m-%d} 0時〜{hm_text(daily_at)} 日本時間</p>
+
+  <p class="lede">{e(prose)}</p>
+
+  <h2>全国の分布（平年の{elem}が{view['main']:g}℃を{verb}日）</h2>
+  <div class="mapwrap">{japan_map_svg(rows, pm, low, high)}</div>
+  <p class="mapkey"><span>{e(key_left)}</span>{legend_svg(pm, low, high)}<span>{e(key_right)}</span></p>
+  <p class="note">都道府県をおおよその位置に並べたもので、実際の面積や形とは異なります。マス目の日付は月/日です。{never_note}マス目を押すと<a href="#hyou">下の表</a>の該当する行に移動します。</p>
+
+  <h2 id="hyou">都道府県別 平年の{elem}が{verb}日</h2>
+  <table class="cols">
+    <caption>平年の{elem}が、それぞれの気温を{verb}日（{view['main']:g}℃の早い順）</caption>
+    <thead><tr><th scope="col">都道府県</th>{head}</tr></thead>
+    <tbody>
+      {"".join(date_rows)}
+    </tbody>
+  </table>
+  <p class="note">各都道府県の県庁所在地の観測点（埼玉県は熊谷、滋賀県は彦根）の日別平年値から求めています。平年値は、気象庁が1991〜2020年の30年間の観測から求めた値です。「—」は、平年ではその気温を{verb}日がないことを表します。出典：気象庁「<a href="{e(heinen.get('source_url', 'https://www.data.jma.go.jp/stats/etrn/index.php'))}" rel="noopener">過去の気象データ検索</a>」。</p>
+
+  <h2>{day_text(daily_at)}の{elem}と平年</h2>
+  <table class="cols">
+    <caption>{day_text(daily_at)} 0時から{hm_text(daily_at)}までの観測（日本時間）。平年は、その日の平年値です</caption>
+    <thead><tr><th scope="col">都道府県</th><th scope="col">{elem}</th><th scope="col">平年</th><th scope="col">平年差</th></tr></thead>
+    <tbody>
+      {"".join(today_rows)}
+    </tbody>
+  </table>
+  <p class="note">観測値は気象庁の「最新の気象データ」をもとにしています。平年差は気象庁の発表値で、まだ発表されていないときは同じ平年値から求めています。</p>
+
+  <h2>{e(guide['heading'])}</h2>
+  {items_html(guide['keywords'], items)}
+  <p class="note">{ITEMS_NOTE}</p>
+"""
+    return page_html(guide, body)
+
+
+def render_top(obs_at, results, season, guides, daily_at):
     entries = []
     for m in METRICS:
         rows = results[m["id"]]
         low, high = value_range(rows)
         left, right = legend_labels(m, low, high)
+        if m["source"] == "daily":
+            what = "その日の最高気温・最低気温と平年差"
+            when = f"観測 {daily_at:%Y-%m-%d} 0時〜{hm_text(daily_at)} 日本時間"
+        else:
+            what = m["name"]
+            when = f"観測 {obs_at:%Y-%m-%d %H:%M} 日本時間"
         entries.append(f"""    <li>
       <a class="entry" href="{m['path']}">
-        <span class="t">{m['title']}</span>
-        <span class="d">気象庁の観測をもとに、47都道府県の代表地点の{m['name']}を並べています。{by_season(m['order_label'], season)}。毎日入れ替わります。</span>
+        <span class="t">{m['h1']}</span>
+        <span class="d">気象庁の観測をもとに、47都道府県の代表地点の{what}を並べています。{by_season(m['order_label'], season)}。毎日入れ替わります。</span>
         <span class="mapwrap">{japan_map_svg(rows, m, low, high, mini=True)}</span>
         <span class="mapkey"><span>{left}</span>{legend_svg(m, low, high)}<span>{right}</span></span>
-        <span class="d">観測 {obs_at:%Y-%m-%d %H:%M} 日本時間／押すと都道府県名と地点名の一覧へ</span>
+        <span class="d">{when}／押すと都道府県名と地点名の一覧へ</span>
+      </a>
+    </li>""")
+    for g in GUIDES:
+        view, rows = guides[g["id"]]
+        pm = guide_map_metric(g, view)
+        got = [r["val"] for r in rows if r["val"] is not None]
+        low, high = (min(got), max(got)) if got else (0.0, 0.0)
+        left, right = guide_legend(view, rows)
+        verb = "下回る" if view["dir"] == "down" else "上回る"
+        temps = "・".join(f"{t:g}℃" for t in view["thresholds"])
+        entries.append(f"""    <li>
+      <a class="entry" href="{g['path']}">
+        <span class="t">{g['h1']}</span>
+        <span class="d">気象庁の平年値をもとに、{g['element_text']}が{temps}を{verb}時期を47都道府県で並べています。その日の{g['element_label']}と平年差も毎日入れ替わります。</span>
+        <span class="mapwrap">{japan_map_svg(rows, pm, low, high, mini=True)}</span>
+        <span class="mapkey"><span>{left}</span>{legend_svg(pm, low, high)}<span>{right}</span></span>
+        <span class="d">地図は平年の{g['element_label']}が{view['main']:g}℃を{verb}日／押すと都道府県別の一覧へ</span>
       </a>
     </li>""")
     pages_html = "\n".join(entries)
@@ -824,8 +1364,8 @@ def render_top(obs_at, results, season):
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 {GA}
-<title>季節かご｜天気と季節に合わせた買い物のヒント</title>
-<meta name="description" content="気象庁の観測をもとに、天気や季節の条件ごとに関連する商品をまとめて紹介しています。">
+<title>季節かご｜都道府県別の気温と、暖房・衣替えの目安（気象庁のデータで毎日更新）</title>
+<meta name="description" content="気象庁のデータをもとに、都道府県別のその日の最高気温・最低気温、暖房や衣替えの目安になる平年の気温、雨量・風速・湿度を毎日まとめています。">
 <link rel="canonical" href="{SITE}/">
 <style>{CSS_TOP}</style>
 </head>
@@ -836,8 +1376,8 @@ def render_top(obs_at, results, season):
   <p class="romaji">kisetsukago</p>
 
   <p class="lede">
-    暑い日、荒れた日、花粉の多い日。天気や季節の条件ごとに、
-    その時期に売れているものを一覧でまとめて置いておくサイトです。
+    暑い日、寒い朝、衣替えの季節。天気や季節の条件ごとに、
+    気象庁のデータを都道府県別にまとめ、その時期に選ばれているものと一緒に置いておくサイトです。
   </p>
 
   <h2>いま見られるページ</h2>
@@ -871,11 +1411,20 @@ def render_top(obs_at, results, season):
 """
 
 
+def render_sitemap(day):
+    """全ページの一覧。中身は毎日入れ替わるので、更新日はすべてその日にする。"""
+    paths = ["/"] + [m["path"] for m in METRICS] + [g["path"] for g in GUIDES]
+    urls = "".join(f"  <url><loc>{SITE}{p}</loc><lastmod>{day}</lastmod></url>\n" for p in paths)
+    return ('<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+            f"{urls}</urlset>\n")
+
+
 def write(path, text):
     folder = os.path.dirname(path)
     if folder:
         os.makedirs(folder, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write(text)
 
 
@@ -893,17 +1442,37 @@ def main():
     now_jst = datetime.now(JST)
     season = season_of(now_jst.month)
     day = now_jst.strftime("%Y-%m-%d")
-    print(f"日付(JST): {day} / 季節: {season} / ページ: {len(METRICS)}枚")
+    print(f"日付(JST): {day} / 季節: {season} / ページ: {len(METRICS) + len(GUIDES)}枚")
+
+    daily_at, daily = fetch_daily()
+    if daily_at.hour < EARLIEST_HOUR:
+        print(f"その日の観測が {hm_text(daily_at)} までしかないため、書き換えずに終わります"
+              "（前の日のページがそのまま残ります）")
+        return
 
     obs_at, obs, table, area = fetch_weather()
     age = (now_jst - obs_at).total_seconds() / 60
     by_pref = stations_by_pref(area)
-    results = {m["id"]: summarize(by_pref, obs, table, m, season) for m in METRICS}
+    results = {}
+    for m in METRICS:
+        if m["source"] == "daily":
+            results[m["id"]] = summarize_daily(by_pref, daily, table, m, season)
+        else:
+            results[m["id"]] = summarize(by_pref, obs, table, m, season)
+
+    heinen = load_heinen()
+    obs_day = daily_at.date()
+    guides = {}
+    for g in GUIDES:
+        view = view_of(g, obs_day.month)
+        guides[g["id"]] = (view, summarize_guide(g, view, heinen, daily, obs_day))
 
     # 同じ言葉は1回だけ取りに行く。続けて叩くと止められるため間を空ける。
+    keyword_sets = [(m["id"], by_season(m["keywords"], season)) for m in METRICS]
+    keyword_sets += [(g["id"], g["keywords"]) for g in GUIDES]
     pools = {}
-    for m in METRICS:
-        for kw in by_season(m["keywords"], season):
+    for _, words in keyword_sets:
+        for kw in words:
             if kw in pools:
                 continue
             if pools:
@@ -912,22 +1481,37 @@ def main():
             print(f"  「{kw}」: 候補{len(pools[kw])}件")
 
     items = {}
-    for m in METRICS:
+    for page_id, words in keyword_sets:
         chosen = []
-        for kw in by_season(m["keywords"], season):
+        for kw in words:
             chosen.extend(pick_daily(pools[kw], day, kw))
-        items[m["id"]] = chosen
+        items[page_id] = chosen
 
-    proses = {m["id"]: prose_text(obs_at, m, season, results[m["id"]]) for m in METRICS}
-    problems = run_checks(results, items, age, obs, by_pref, proses)
+    proses = {m["id"]: prose_text(obs_at, m, season, results[m["id"]], daily_at) for m in METRICS}
+    for g in GUIDES:
+        view, rows = guides[g["id"]]
+        proses[g["id"]] = guide_prose(g, view, rows)
 
-    print(f"観測時刻: {obs_at:%Y-%m-%d %H:%M}（{age:.0f}分前） / 都道府県: {len(by_pref)}")
+    problems = run_checks({
+        "now": now_jst, "age": age, "daily_at": daily_at, "by_pref": by_pref,
+        "obs": obs, "daily": daily, "results": results, "heinen": heinen,
+        "guides": {k: v[1] for k, v in guides.items()}, "items": items, "proses": proses,
+    })
+
+    print(f"アメダス: {obs_at:%Y-%m-%d %H:%M}（{age:.0f}分前） / 最高・最低気温: "
+          f"{daily_at:%Y-%m-%d %H:%M}まで / 都道府県: {len(by_pref)}")
     for m in METRICS:
         rows = results[m["id"]]
         low, high = value_range(rows)
         blank = sum(1 for r in rows if r["val"] is None)
         print(f"  {m['name']}: {fmt(m, low)}〜{fmt(m, high)}{m['unit']} / "
               f"商品{len(items[m['id']])}件 / データなし{blank}県")
+    for g in GUIDES:
+        view, rows = guides[g["id"]]
+        dated = sum(1 for r in rows if r["key"] is not None)
+        seen = sum(1 for r in rows if r["today"] is not None)
+        print(f"  {g['name']}（{view['label']}）: 目安の日 {dated}県 / その日の観測 {seen}県 / "
+              f"商品{len(items[g['id']])}件")
     if problems:
         print("--- 検査で問題を検出。公開しません ---")
         for p in problems:
@@ -936,9 +1520,15 @@ def main():
 
     for m in METRICS:
         write(m["out"], render_page(obs_at, m, results[m["id"]], items[m["id"]],
-                                    proses[m["id"]], season))
-    write(OUT_TOP, render_top(obs_at, results, season))
-    written = ", ".join([m["out"] for m in METRICS] + [OUT_TOP])
+                                    proses[m["id"]], season, daily_at))
+    for g in GUIDES:
+        view, rows = guides[g["id"]]
+        write(g["out"], render_guide(g, view, rows, items[g["id"]], proses[g["id"]],
+                                     daily_at, heinen))
+    write(OUT_TOP, render_top(obs_at, results, season, guides, daily_at))
+    write(OUT_SITEMAP, render_sitemap(obs_day.isoformat()))
+    written = ", ".join([m["out"] for m in METRICS] + [g["out"] for g in GUIDES]
+                        + [OUT_TOP, OUT_SITEMAP])
     print(f"検査: 問題なし / 書き出し: {written}")
 
 
