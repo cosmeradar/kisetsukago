@@ -1880,11 +1880,11 @@ def render_top(obs_at, results, season, guides, daily_at, touyu):
 {pages_html}
   </ul>
 
-  <h2>これから増やす予定の条件</h2>
+  <h2>これから増やす予定のページ</h2>
   <ul class="band">
-    <li>台風</li><li>花粉</li><li>黄砂</li><li>紫外線</li><li>雪</li>
+    <li>積雪</li>
   </ul>
-  <p class="note">条件ごとに1ページずつ用意し、中身を毎日入れ替えていきます。</p>
+  <p class="note">雪の季節に、都道府県別の積雪のページを用意する予定です。</p>
 
   <h2>このサイトの位置づけ</h2>
   <p class="note">
