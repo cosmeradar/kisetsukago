@@ -8,6 +8,9 @@
 - 平年値の目安のページ（GUIDES）: 暖房・衣替え
   data/heinen.json（県庁所在地などの日別平年値。scripts/make_heinen.py で作る）から、
   決まった気温を下回る（上回る）日を求め、その日の観測とあわせて載せる。
+- 灯油の値段のページ（TOUYU）: 総務省「小売物価統計調査（動向編）」の県庁所在市の灯油18Lの値段。
+  data/touyu.json（過去の分は scripts/make_touyu.py で作る）に、新しい月が公表されたら e-Stat から足していく。
+  取りに行けない日も前の値でページを作り、長く新しくならないときだけ build_warnings.txt に書いて知らせる。
 ページごとの違いは METRICS と GUIDES の表に集めてあるので、ページを増やすときはそこに1つ足す。
 並び順と商品は季節で切り替える（夏＝4〜9月、冬＝10〜3月）。
 商品は楽天のレビュー件数上位から、日付を種にして日替わりで選ぶ。
@@ -24,11 +27,14 @@ import io
 import json
 import os
 import random
+import re
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
+import zipfile
 from datetime import date, datetime, timezone, timedelta
 
 JST = timezone(timedelta(hours=9))
@@ -44,9 +50,21 @@ RAKUTEN = "https://openapi.rakuten.co.jp/ichibams/api/IchibaItem/Search/20260701
 SITE = "https://kisetsukago.com"
 GA_ID = "G-C46GBVZFLL"
 
+# 灯油の値段（総務省「小売物価統計調査（動向編）」。毎月1回、翌月の下旬に公表）
+ESTAT_LIST = ("https://www.e-stat.go.jp/stat-search/files?page=1&layout=datalist&cycle=1"
+              "&toukei=00200571&tstat=000000680001&tclass1val=0&year={year}0&month={code}&result_back=1")
+ESTAT_FILE = "https://www.e-stat.go.jp/stat-search/file-download?statInfId={sid}&fileKind={kind}"
+TOKYO_KEROSENE = "https://www.stat.go.jp/data/kouri/doukou/zuhyou/7301_3701_13.xlsx"
+KOURI_SCHEDULE = "https://www.stat.go.jp/data/kouhyou/e-stat_kouri_schedule.xml"
+WEEKLY_OFFICIAL = "https://www.enecho.meti.go.jp/statistics/petroleum_and_lpgas/pl007/results.html"
+
 OUT_TOP = "index.html"
 OUT_SITEMAP = "sitemap.xml"
 HEINEN_FILE = "data/heinen.json"
+TOUYU_FILE = "data/touyu.json"
+# 灯油の新しい月がこの日数より長く入ってこなければ、自動実行を「失敗」にして知らせる（ページは前の値で作る）
+TOUYU_STALE_DAYS = 80
+WARN_FILE = "build_warnings.txt"
 MAX_AGE_MINUTES = 180
 # 日本時間でこれより前に動いたときは、その日の観測が短すぎるので書き換えない
 EARLIEST_HOUR = 6
@@ -89,6 +107,26 @@ PREF = {
 }
 
 PREF_CODE = {name: code for code, name in PREF.items()}
+
+# 都道府県庁所在市（小売物価統計の都市名）。古い年の表は「市」が付かないので別名も持つ
+CAPITALS = {
+    "01": ("札幌市", ("札幌",)), "02": ("青森市", ("青森",)), "03": ("盛岡市", ("盛岡",)),
+    "04": ("仙台市", ("仙台",)), "05": ("秋田市", ("秋田",)), "06": ("山形市", ("山形",)),
+    "07": ("福島市", ("福島",)), "08": ("水戸市", ("水戸",)), "09": ("宇都宮市", ("宇都宮",)),
+    "10": ("前橋市", ("前橋",)), "11": ("さいたま市", ("さいたま",)), "12": ("千葉市", ("千葉",)),
+    "13": ("東京都区部", ("区部", "東京")), "14": ("横浜市", ("横浜",)), "15": ("新潟市", ("新潟",)),
+    "16": ("富山市", ("富山",)), "17": ("金沢市", ("金沢",)), "18": ("福井市", ("福井",)),
+    "19": ("甲府市", ("甲府",)), "20": ("長野市", ("長野",)), "21": ("岐阜市", ("岐阜",)),
+    "22": ("静岡市", ("静岡",)), "23": ("名古屋市", ("名古屋",)), "24": ("津市", ("津",)),
+    "25": ("大津市", ("大津",)), "26": ("京都市", ("京都",)), "27": ("大阪市", ("大阪",)),
+    "28": ("神戸市", ("神戸",)), "29": ("奈良市", ("奈良",)), "30": ("和歌山市", ("和歌山",)),
+    "31": ("鳥取市", ("鳥取",)), "32": ("松江市", ("松江",)), "33": ("岡山市", ("岡山",)),
+    "34": ("広島市", ("広島",)), "35": ("山口市", ("山口",)), "36": ("徳島市", ("徳島",)),
+    "37": ("高松市", ("高松",)), "38": ("松山市", ("松山",)), "39": ("高知市", ("高知",)),
+    "40": ("福岡市", ("福岡",)), "41": ("佐賀市", ("佐賀",)), "42": ("長崎市", ("長崎",)),
+    "43": ("熊本市", ("熊本",)), "44": ("大分市", ("大分",)), "45": ("宮崎市", ("宮崎",)),
+    "46": ("鹿児島市", ("鹿児島",)), "47": ("那覇市", ("那覇",)),
+}
 
 # マス目の日本地図。(都道府県, 列, 行)。左上が 0,0。
 TILE_MAP = [
@@ -296,20 +334,37 @@ GUIDES = [
     },
 ]
 
+# ---------- 灯油の値段のページ ----------
+# 総務省「小売物価統計調査（動向編）」の品目3701 灯油（18L）。県庁所在市の値段を毎月入れ替える。
+# 公式の毎週の調査（資源エネルギー庁）はプログラムからの取得を受け付けていないので使わず、リンクで案内する。
+TOUYU = {
+    "id": "touyu",
+    "out": "touyu/index.html",
+    "path": "/touyu/",
+    "name": "灯油",
+    "h1": "灯油の値段（18リットル）",
+    "title": "灯油の値段と推移（18リットル）｜47都道府県の県庁所在市別・総務省の毎月の調査",
+    "desc": "総務省の小売物価統計調査をもとに、47都道府県の県庁所在市の灯油18リットルの店頭価格と、"
+            "前の月・前の年からの値動き、東京都区部の長い推移を毎月まとめています。",
+    "heading": "灯油を使う季節に選ばれているもの",
+    "keywords": ["石油ファンヒーター", "灯油ポンプ", "灯油タンク"],
+}
+
+ALL_PAGES = METRICS + GUIDES + [TOUYU]
+
 
 # ---------- 取得 ----------
 
-def get(url, as_json=True, headers=None, tries=4, encoding="utf-8"):
-    """取得する。混雑や一時的な不調なら間を空けて数回試す。"""
+def get_bytes(url, headers=None, tries=4):
+    """取得する（中身はそのまま）。混雑や一時的な不調なら間を空けて数回試す。"""
     h = {"User-Agent": "kisetsukago/0.1"}
     h.update(headers or {})
     last = None
     for i in range(tries):
         try:
             req = urllib.request.Request(url, headers=h)
-            with urllib.request.urlopen(req, timeout=30) as r:
-                raw = r.read().decode(encoding)
-            return json.loads(raw) if as_json else raw.strip()
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return r.read()
         except urllib.error.HTTPError as err:
             last = err
             if err.code not in RETRY_CODES:
@@ -320,6 +375,12 @@ def get(url, as_json=True, headers=None, tries=4, encoding="utf-8"):
         print(f"  取得に失敗（{last}）。{wait}秒待って再試行します")
         time.sleep(wait)
     raise last
+
+
+def get(url, as_json=True, headers=None, tries=4, encoding="utf-8"):
+    """取得して文字にする。as_json なら JSON として読む。"""
+    raw = get_bytes(url, headers=headers, tries=tries).decode(encoding)
+    return json.loads(raw) if as_json else raw.strip()
 
 
 def value_of(entry, key):
@@ -715,6 +776,324 @@ def guide_prose(guide, view, rows):
             f"{guide['note']}")
 
 
+# ---------- 灯油の値段 ----------
+
+def col_index(ref):
+    """「AB12」のようなセル番地から、列の番号（0から）を返す。"""
+    n = 0
+    for ch in ref:
+        if not ch.isalpha():
+            break
+        n = n * 26 + (ord(ch.upper()) - 64)
+    return n - 1
+
+
+def read_xlsx(data):
+    """Excel（.xlsx）を標準の道具だけで読む。{シート名: [行（列番号どおりの並び）]} を返す。"""
+    ns = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+    rid = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+    z = zipfile.ZipFile(io.BytesIO(data))
+    names = z.namelist()
+    shared = []
+    if "xl/sharedStrings.xml" in names:
+        for si in ET.fromstring(z.read("xl/sharedStrings.xml")).iter(ns + "si"):
+            # ふりがな（rPh）の文字は除き、本体の文字（t と、書式つきの r の中の t）だけをつなぐ
+            parts = [t.text or "" for t in si.findall(ns + "t")]
+            parts += [t.text or "" for r in si.findall(ns + "r") for t in r.findall(ns + "t")]
+            shared.append("".join(parts))
+    rels = {r.get("Id"): r.get("Target") for r in ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))}
+    book = {}
+    for sh in ET.fromstring(z.read("xl/workbook.xml")).iter(ns + "sheet"):
+        target = rels.get(sh.get(rid), "")
+        path = target.lstrip("/") if target.startswith("/") else "xl/" + target
+        if path not in names:
+            continue
+        rows = []
+        for row in ET.fromstring(z.read(path)).iter(ns + "row"):
+            cells = {}
+            for c in row.iter(ns + "c"):
+                kind, v = c.get("t"), c.find(ns + "v")
+                if kind == "s" and v is not None:
+                    val = shared[int(v.text)]
+                elif kind == "inlineStr":
+                    val = "".join(t.text or "" for t in c.iter(ns + "t"))
+                elif v is not None and v.text is not None:
+                    val = to_float(v.text)
+                    if val is None:
+                        val = v.text
+                else:
+                    val = None
+                cells[col_index(c.get("r", "A"))] = val
+            rows.append([cells.get(i) for i in range(max(cells) + 1)] if cells else [])
+        book[sh.get("name")] = rows
+    return book
+
+
+def first_sheet_rows(data):
+    if data[:2] != b"PK":
+        raise ValueError("Excel（.xlsx）の形ではありません")
+    return next(iter(read_xlsx(data).values()))
+
+
+def estat_month_code(month):
+    """e-Stat の一覧の「月」の指定。1〜3月は110103、4〜6月は120406、7〜9月は230709、10〜12月は241012 に月を2桁で付ける。"""
+    head = {1: "110103", 2: "120406", 3: "230709", 4: "241012"}[(month - 1) // 3 + 1]
+    return f"{head}{month:02d}"
+
+
+def find_touyu_files(year, month):
+    """e-Stat の一覧から、その月の「主要品目の都市別小売価格」（品目3001〜の表）と、市町村銘柄設定一覧の番号を探す。
+
+    まだ公表されていない月は (None, None, None) を返す。
+    """
+    page = get(ESTAT_LIST.format(year=year, code=estat_month_code(month)), as_json=False)
+    want = f"主要品目の都市別小売価格【{year}年{month}月】"
+    table = brand = released = None
+    for block in page.split("stat-dataset_list-item")[1:]:
+        text = re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", block)))
+        if want not in text:
+            continue
+        sid = re.search(r"statInfId=(\d+)&(?:amp;)?fileKind=(\d)", block)
+        if not sid:
+            continue
+        if "「3001" in text and sid.group(2) == "0":
+            table = sid.group(1)
+            m = re.search(r"公開（更新）日 (\d{4}-\d{2}-\d{2})", text)
+            released = m.group(1) if m else None
+        elif "市町村銘柄設定一覧" in text:
+            brand = sid.group(1)
+    return table, brand, released
+
+
+def touyu_prices(rows):
+    """都市別小売価格の表から、灯油（品目3701）の県庁所在市の値段を取り出す。{都道府県コード: 円}。"""
+    names = kero = None
+    for r in rows:
+        cells = [str(v).strip() if v is not None else "" for v in r]
+        if names is None and ("札幌市" in cells or "札幌" in cells):
+            names = cells
+        if kero is None and "灯油" in cells and any(c in ("3701", "3701.0") for c in cells):
+            kero = r
+    if names is None or kero is None:
+        raise ValueError("都市名の行か灯油の行が見つかりません")
+    prices = {}
+    for code, (city, alias) in CAPITALS.items():
+        for cand in (city,) + alias:
+            if cand in names:
+                j = names.index(cand)
+                v = kero[j] if j < len(kero) else None
+                if isinstance(v, (int, float)):
+                    prices[code] = int(round(v))
+                break
+    return prices
+
+
+def local_brand_capitals(data):
+    """市町村銘柄設定一覧（CSV）から、灯油を基本銘柄とは別の銘柄で調べている県庁所在市を返す。"""
+    text = data.decode("cp932", "replace")
+    by_name = {city: code for code, (city, _) in CAPITALS.items()}
+    out = set()
+    for r in csv.reader(io.StringIO(text)):
+        if len(r) >= 5 and r[1].strip() == "3701" and r[4].strip() in by_name:
+            out.add(by_name[r[4].strip()])
+    return sorted(out)
+
+
+def tokyo_series(book):
+    """東京都区部の灯油の長い表から、店頭売り（2008年11月から）の月ごとの値段を取り出す。{"YYYY-MM": 円}。"""
+    rows = next(v for k, v in book.items() if "3701" in k and "グラフ" not in k)
+    out = {}
+    for r in rows:
+        if len(r) < 4 or not isinstance(r[1], float) or not isinstance(r[3], float):
+            continue
+        d = date(1899, 12, 30) + timedelta(days=int(r[1]))
+        out[f"{d.year}-{d.month:02d}"] = int(round(r[3]))
+    return out
+
+
+def next_release(data, today):
+    """統計局の公表予定（UTF-16 の XML）から、都市別小売価格の次の公表を返す。"""
+    text = data.decode("utf-16")
+    block = re.search(r'<class_1 name="【動向編】主要品目の都市別小売価格[^"]*">(.*?)</class_1>', text, re.S)
+    if not block:
+        return None
+    pat = (r'<class_2 name="(\d{4})年(\d{1,2})月分">.*?<release_year>(\d+)</release_year>\s*'
+           r'<release_month>(\d+)</release_month>\s*<release_day>(\d+)</release_day>')
+    for m in re.finditer(pat, block.group(1), re.S):
+        when = date(int(m.group(3)), int(m.group(4)), int(m.group(5)))
+        if when > today:
+            return {"month": f"{m.group(1)}-{int(m.group(2)):02d}", "date": when.isoformat()}
+    return None
+
+
+def month_shift(key, n):
+    y, m = map(int, key.split("-"))
+    i = y * 12 + (m - 1) + n
+    return f"{i // 12}-{i % 12 + 1:02d}"
+
+
+def month_text(key):
+    y, m = map(int, key.split("-"))
+    return f"{y}年{m}月"
+
+
+def iso_text(iso):
+    d = date.fromisoformat(iso)
+    return f"{d.year}年{d.month}月{d.day}日"
+
+
+def update_touyu(data, today):
+    """新しく公表された月の値段と、東京都区部の推移・次の公表予定を取りに行く。
+
+    取れなくてもページは前の値で作る（ここで止めない）。返すのは (書き換えたか, 気になったことの一覧)。
+    """
+    notes = []
+    changed = False
+    months = data.setdefault("months", {})
+    key = max(months) if months else "2019-12"
+    for _ in range(3):  # 取りこぼした月があっても3か月分までは追いつく
+        key = month_shift(key, 1)
+        y, m = map(int, key.split("-"))
+        if (y, m) >= (today.year, today.month):
+            break
+        try:
+            table, brand, released = find_touyu_files(y, m)
+        except Exception as err:
+            notes.append(f"e-Stat の一覧を読めませんでした（{month_text(key)}分）: {err}")
+            break
+        if not table:
+            break  # まだ公表されていない
+        try:
+            prices = touyu_prices(first_sheet_rows(get_bytes(ESTAT_FILE.format(sid=table, kind=0))))
+        except Exception as err:
+            notes.append(f"{month_text(key)}分の表を読めませんでした: {err}")
+            break
+        odd = [c for c, v in prices.items() if not 500 <= v <= 6000]
+        if len(prices) < 40 or odd:
+            notes.append(f"{month_text(key)}分の値がそろいません（{len(prices)}市・範囲外 {odd}）")
+            break
+        months[key] = prices
+        data.setdefault("released", {})[key] = released
+        data.setdefault("statinf", {})[key] = table
+        if brand:
+            try:
+                data.setdefault("local_brand", {})[key] = local_brand_capitals(
+                    get_bytes(ESTAT_FILE.format(sid=brand, kind=1)))
+            except Exception as err:
+                notes.append(f"{month_text(key)}分の市町村銘柄設定一覧を読めませんでした: {err}")
+        changed = True
+        print(f"  灯油: {month_text(key)}分を足しました（{len(prices)}市）")
+        time.sleep(2)
+    try:
+        tokyo = tokyo_series(read_xlsx(get_bytes(TOKYO_KEROSENE)))
+        if len(tokyo) >= len(data.get("tokyo", {})) and tokyo != data.get("tokyo"):
+            data["tokyo"] = tokyo
+            changed = True
+        print(f"  灯油: 東京都区部の推移 {min(tokyo)}〜{max(tokyo)}")
+    except Exception as err:
+        notes.append(f"東京都区部の推移を読めませんでした: {err}")
+    try:
+        nxt = next_release(get_bytes(KOURI_SCHEDULE), today)
+        if nxt and nxt != data.get("next_release"):
+            data["next_release"] = nxt
+            changed = True
+    except Exception as err:
+        notes.append(f"公表予定を読めませんでした: {err}")
+    return changed, notes
+
+
+def touyu_stale_days(data, today):
+    """いちばん新しい月の末日から何日たったか。"""
+    key = max(data["months"])
+    end = date.fromisoformat(month_shift(key, 1) + "-01") - timedelta(days=1)
+    return (today - end).days
+
+
+def summarize_touyu(data):
+    """いちばん新しい月の、県庁所在市ごとの値段と前月差・前年同月差。安い順に並べる。"""
+    months = data["months"]
+    latest = max(months)
+    cur, prev, last_year = months[latest], months.get(month_shift(latest, -1), {}), months.get(month_shift(latest, -12), {})
+    brand = set(data.get("local_brand", {}).get(latest, []))
+    rows = []
+    for code, pref in PREF.items():
+        v = cur.get(code)
+        rows.append({
+            "pref": pref, "code": code, "city": CAPITALS[code][0], "val": v,
+            "label": f"{v:,}" if v is not None else "—",
+            "mom": v - prev[code] if v is not None and code in prev else None,
+            "yoy": v - last_year[code] if v is not None and code in last_year else None,
+            "brand": code in brand,
+        })
+    rows.sort(key=lambda r: (r["val"] is None, r["val"] or 0, r["code"]))
+    return latest, rows
+
+
+def average(values):
+    vals = [v for v in values if v is not None]
+    return round(sum(vals) / len(vals)) if vals else None
+
+
+def touyu_prose(data, latest, rows):
+    """値段の本文。言い回しは固定で、毎月変わるのは月と数字だけ。"""
+    got = [r for r in rows if r["val"] is not None]
+    low, high = got[0], got[-1]
+    avg = average(r["val"] for r in rows)
+    text = (f"総務省統計局の小売物価統計調査をもとに、47都道府県の県庁所在市の灯油18リットルの店頭価格を、"
+            f"安い順に並べています。{month_text(latest)}分は、最も安い{low['city']}（{low['pref']}）で{low['val']:,}円、"
+            f"最も高い{high['city']}（{high['pref']}）で{high['val']:,}円でした。")
+    last = data["months"].get(month_shift(latest, -12))
+    if avg is not None and last:
+        old = average(last.get(code) for code in PREF)
+        if old:
+            diff = avg - old
+            how = "高く" if diff > 0 else "安く" if diff < 0 else "同じ値段に"
+            amount = f"{abs(diff):,}円" if diff else ""
+            text += (f"47市の平均は{avg:,}円で、1年前の同じ月（{old:,}円）より{amount}{how}なっています"
+                     f"（平均は当サイトの計算）。")
+    tokyo = next(r for r in rows if r["code"] == "13")
+    if tokyo["val"] is not None:
+        text += f"東京都区部は{tokyo['val']:,}円です。"
+    nxt = data.get("next_release")
+    if nxt:
+        text += f"値段は毎月1回の調査で、次の{month_text(nxt['month'])}分は{iso_text(nxt['date'])}に公表される予定です。"
+    return text
+
+
+def tokyo_yearly(tokyo):
+    """東京都区部の店頭売りの年平均（12か月そろった年だけ）。"""
+    years = {}
+    for key, v in tokyo.items():
+        years.setdefault(int(key[:4]), []).append(v)
+    return [(y, round(sum(v) / len(v))) for y, v in sorted(years.items()) if len(v) == 12]
+
+
+def tokyo_chart_svg(tokyo):
+    """東京都区部の店頭売りの月ごとの値段を、折れ線で描く。"""
+    keys = sorted(tokyo)
+    vals = [tokyo[k] for k in keys]
+    w, h, left, right, top, bottom = 640, 240, 52, 12, 14, 30
+    lo = min(vals) // 500 * 500
+    hi = -(-max(vals) // 500) * 500
+    def x(i):
+        return left + (w - left - right) * i / max(1, len(keys) - 1)
+    def y(v):
+        return top + (h - top - bottom) * (hi - v) / max(1, hi - lo)
+    parts = []
+    for v in range(lo, hi + 1, 500):
+        parts.append(f'<line x1="{left}" y1="{y(v):.1f}" x2="{w - right}" y2="{y(v):.1f}" class="grid"/>'
+                     f'<text x="{left - 6}" y="{y(v) + 4:.1f}" class="ax" text-anchor="end">{v:,}</text>')
+    for i, k in enumerate(keys):
+        if k.endswith("-01") and int(k[:4]) % 2 == 0:
+            parts.append(f'<text x="{x(i):.1f}" y="{h - 10}" class="ax" text-anchor="middle">{k[:4]}</text>')
+    points = " ".join(f"{x(i):.1f},{y(v):.1f}" for i, v in enumerate(vals))
+    parts.append(f'<polyline points="{points}" class="line"/>')
+    title = (f"東京都区部の灯油18リットルの店頭価格（{month_text(keys[0])}〜{month_text(keys[-1])}）。"
+             f"最も安い月は{min(vals):,}円、最も高い月は{max(vals):,}円")
+    return (f'<svg class="chart" viewBox="0 0 {w} {h}" role="img" aria-label="{title}">'
+            f"<title>{title}</title>{''.join(parts)}</svg>")
+
+
 # ---------- 地図 ----------
 
 def short_pref(name):
@@ -907,7 +1286,19 @@ def run_checks(ctx):
             if r["today"] is not None and not (-50.0 <= r["today"] <= 50.0):
                 problems.append(f"{g['name']}のページの観測が異常値: {r['pref']} {r['today']}")
 
-    for page in METRICS + GUIDES:
+    touyu = ctx["touyu"]
+    if not touyu.get("months"):
+        problems.append("灯油の値段のデータが無い")
+    else:
+        latest = max(touyu["months"])
+        cur = touyu["months"][latest]
+        if len(cur) < 40:
+            problems.append(f"灯油の値段がそろわない（{month_text(latest)}分・{len(cur)}市）")
+        odd = [f"{CAPITALS[c][0]} {v}" for c, v in cur.items() if not 500 <= v <= 6000]
+        if odd:
+            problems.append(f"灯油の値段が異常値: {odd}")
+
+    for page in ALL_PAGES:
         name = page["name"]
         group = ctx["items"][page["id"]]
         if not group:
@@ -988,6 +1379,10 @@ CSS_KION = CSS_COMMON + """
   table.cols td{font-variant-numeric:tabular-nums;white-space:nowrap}
   table.cols caption{caption-side:top;text-align:left;font-size:.8125rem;
                      color:var(--ink-soft);padding:0 0 .5rem}
+  svg.chart{display:block;width:100%;height:auto;min-width:30rem}
+  svg.chart .grid{stroke:var(--rule);stroke-width:1}
+  svg.chart .ax{font-size:11px;fill:var(--ink-soft);font-family:var(--gothic)}
+  svg.chart .line{fill:none;stroke:var(--hi);stroke-width:2}
   .sub{display:block;font-size:.75rem;color:var(--ink-soft);line-height:1.5}
   h3.kw{font-size:.875rem;font-weight:600;margin:0 0 .75rem}
   h3.kw::before{content:"／ ";color:var(--koke)}
@@ -1122,9 +1517,8 @@ def items_html(keywords, items):
 
 
 def other_links(current_id):
-    pages = METRICS + GUIDES
     return "".join(f'<li><a href="{p["path"]}">{p["h1"]}</a></li>'
-                   for p in pages if p["id"] != current_id)
+                   for p in ALL_PAGES if p["id"] != current_id)
 
 
 def page_html(page, body):
@@ -1318,7 +1712,96 @@ def render_guide(guide, view, rows, items, prose, daily_at, heinen):
     return page_html(guide, body)
 
 
-def render_top(obs_at, results, season, guides, daily_at):
+TOUYU_MAP = {"name": "灯油18リットルの値段", "scale": ("heat",), "digits": 0, "unit": "円"}
+
+
+def signed_yen(v):
+    return "—" if v is None else f"{v:+,}円"
+
+
+def touyu_stamp(data, latest):
+    released = data.get("released", {}).get(latest)
+    text = f"総務省 小売物価統計調査（動向編）／{month_text(latest)}分"
+    if released:
+        text += f"（{iso_text(released)}公表）"
+    nxt = data.get("next_release")
+    if nxt:
+        text += f"／次は{month_text(nxt['month'])}分を{iso_text(nxt['date'])}に公表予定"
+    return text
+
+
+def render_touyu(data, latest, rows, items, prose):
+    e = html.escape
+    got = [r["val"] for r in rows if r["val"] is not None]
+    low, high = (min(got), max(got)) if got else (0, 0)
+
+    table_rows = []
+    for r in rows:
+        mark = ' <span class="tag cold">※</span>' if r["brand"] else ""
+        val = f"{r['val']:,}円" if r["val"] is not None else "—"
+        table_rows.append(
+            f'<tr id="p{r["code"]}"><th scope="row">{e(r["pref"])}<span class="sub">{e(r["city"])}</span></th>'
+            f"<td>{val}{mark}</td><td>{signed_yen(r['mom'])}</td><td>{signed_yen(r['yoy'])}</td></tr>")
+    brand_note = ""
+    marked = [r for r in rows if r["brand"]]
+    if marked:
+        names = "・".join(f"{r['pref']}（{r['city']}）" for r in marked)
+        brand_note = (f'<p class="note">※ {e(names)}は、基本の銘柄（店頭売り）の出回りが少ないため、'
+                      "総務省がその市の実情に合わせて出回りの多い銘柄を決めて調べている値です（総務省の注記）。"
+                      "ほかの市とそのまま比べられないことがあります。</p>")
+
+    tokyo = data.get("tokyo", {})
+    history = ""
+    if len(tokyo) >= 24:
+        first, last = min(tokyo), max(tokyo)
+        yearly = "".join(f'<tr><th scope="row">{y}年</th><td>{v:,}円</td></tr>' for y, v in tokyo_yearly(tokyo))
+        history = f"""
+  <h2>東京都区部の推移（{month_text(first)}〜{month_text(last)}）</h2>
+  <div class="mapwrap">{tokyo_chart_svg(tokyo)}</div>
+  <p class="note">東京都区部の灯油18リットルの店頭価格です。{month_text(last)}分は{tokyo[last]:,}円でした（東京都区部だけは、都市別の表より早く公表されます）。</p>
+  <table class="cols">
+    <caption>東京都区部の年平均（12か月の平均・当サイトの計算）</caption>
+    <thead><tr><th scope="col">年</th><th scope="col">18リットル</th></tr></thead>
+    <tbody>
+      {yearly}
+    </tbody>
+  </table>
+  <p class="note">出典：総務省統計局「小売物価統計調査（動向編）」東京都区部の灯油の小売価格（長期時系列）を加工して作成。</p>
+"""
+
+    prev, last_year = month_shift(latest, -1), month_shift(latest, -12)
+    body = f"""  <p class="stamp">{e(touyu_stamp(data, latest))}</p>
+
+  <p class="lede">{e(prose)}</p>
+
+  <h2>全国の分布（{month_text(latest)}分・18リットルの店頭価格）</h2>
+  <div class="mapwrap">{japan_map_svg(rows, TOUYU_MAP, low, high)}</div>
+  <p class="mapkey"><span>{low:,}円</span>{legend_svg(TOUYU_MAP, low, high)}<span>{high:,}円</span></p>
+  <p class="note">都道府県をおおよその位置に並べたもので、実際の面積や形とは異なります。マス目の数字は、その都道府県の県庁所在市の値段（円）です。マス目を押すと<a href="#hyou">下の表</a>の該当する行に移動します。</p>
+
+  <h2 id="hyou">都道府県別 県庁所在市の灯油の値段</h2>
+  <table class="cols">
+    <caption>{month_text(latest)}分・18リットルの店頭価格（安い順）。前月差・前年同月差は、同じ市の{month_text(prev)}分・{month_text(last_year)}分との差です</caption>
+    <thead><tr><th scope="col">都道府県</th><th scope="col">18リットル</th><th scope="col">前月差</th><th scope="col">前年同月差</th></tr></thead>
+    <tbody>
+      {"".join(table_rows)}
+    </tbody>
+  </table>
+  {brand_note}
+  <p class="note">値段は総務省統計局の小売物価統計調査（毎月1回）によるもので、灯油は「白灯油，詰め替え売り，店頭売り」の18リットルの値段です。出典：総務省統計局「小売物価統計調査（動向編）」主要品目の都市別小売価格（<a href="https://www.e-stat.go.jp/" rel="noopener">政府統計の総合窓口 e-Stat</a>）を加工して作成。</p>
+{history}
+  <h2>毎週の値段（都道府県別）</h2>
+  <p class="note">最新の週ごとの値段（都道府県別）は、資源エネルギー庁の「石油製品価格調査」で毎週公表されています。</p>
+  <ul class="links"><li><a href="{WEEKLY_OFFICIAL}" rel="noopener">資源エネルギー庁 石油製品価格調査 調査の結果</a></li></ul>
+
+  <h2>{e(TOUYU['heading'])}</h2>
+  {items_html(TOUYU['keywords'], items)}
+  <p class="note">{ITEMS_NOTE}</p>
+"""
+    return page_html(TOUYU, body)
+
+
+def render_top(obs_at, results, season, guides, daily_at, touyu):
     entries = []
     for m in METRICS:
         rows = results[m["id"]]
@@ -1356,6 +1839,18 @@ def render_top(obs_at, results, season, guides, daily_at):
         <span class="d">地図は平年の{g['element_label']}が{view['main']:g}℃を{verb}日／押すと都道府県別の一覧へ</span>
       </a>
     </li>""")
+    t_data, t_latest, t_rows = touyu
+    got = [r["val"] for r in t_rows if r["val"] is not None]
+    t_low, t_high = (min(got), max(got)) if got else (0, 0)
+    entries.append(f"""    <li>
+      <a class="entry" href="{TOUYU['path']}">
+        <span class="t">{TOUYU['h1']}</span>
+        <span class="d">総務省の毎月の調査をもとに、47都道府県の県庁所在市の灯油18リットルの店頭価格を並べています。前の月・前の年との差と、東京都区部の長い推移も載せています。</span>
+        <span class="mapwrap">{japan_map_svg(t_rows, TOUYU_MAP, t_low, t_high, mini=True)}</span>
+        <span class="mapkey"><span>{t_low:,}円</span>{legend_svg(TOUYU_MAP, t_low, t_high)}<span>{t_high:,}円</span></span>
+        <span class="d">{html.escape(touyu_stamp(t_data, t_latest))}／押すと都道府県別の一覧へ</span>
+      </a>
+    </li>""")
     pages_html = "\n".join(entries)
 
     return f"""<!DOCTYPE html>
@@ -1364,8 +1859,8 @@ def render_top(obs_at, results, season, guides, daily_at):
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 {GA}
-<title>季節かご｜都道府県別の気温と、暖房・衣替えの目安（気象庁のデータで毎日更新）</title>
-<meta name="description" content="気象庁のデータをもとに、都道府県別のその日の最高気温・最低気温、暖房や衣替えの目安になる平年の気温、雨量・風速・湿度を毎日まとめています。">
+<title>季節かご｜都道府県別の気温と、暖房・衣替えの目安、灯油の値段（毎日更新）</title>
+<meta name="description" content="気象庁と総務省のデータをもとに、都道府県別のその日の最高気温・最低気温、暖房や衣替えの目安になる平年の気温、県庁所在市の灯油の値段、雨量・風速・湿度をまとめています。">
 <link rel="canonical" href="{SITE}/">
 <style>{CSS_TOP}</style>
 </head>
@@ -1377,7 +1872,7 @@ def render_top(obs_at, results, season, guides, daily_at):
 
   <p class="lede">
     暑い日、寒い朝、衣替えの季節。天気や季節の条件ごとに、
-    気象庁のデータを都道府県別にまとめ、その時期に選ばれているものと一緒に置いておくサイトです。
+    気象庁などの公的なデータを都道府県別にまとめ、その時期に選ばれているものと一緒に置いておくサイトです。
   </p>
 
   <h2>いま見られるページ</h2>
@@ -1413,7 +1908,7 @@ def render_top(obs_at, results, season, guides, daily_at):
 
 def render_sitemap(day):
     """全ページの一覧。中身は毎日入れ替わるので、更新日はすべてその日にする。"""
-    paths = ["/"] + [m["path"] for m in METRICS] + [g["path"] for g in GUIDES]
+    paths = ["/"] + [p["path"] for p in ALL_PAGES]
     urls = "".join(f"  <url><loc>{SITE}{p}</loc><lastmod>{day}</lastmod></url>\n" for p in paths)
     return ('<?xml version="1.0" encoding="UTF-8"?>\n'
             '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
@@ -1442,7 +1937,7 @@ def main():
     now_jst = datetime.now(JST)
     season = season_of(now_jst.month)
     day = now_jst.strftime("%Y-%m-%d")
-    print(f"日付(JST): {day} / 季節: {season} / ページ: {len(METRICS) + len(GUIDES)}枚")
+    print(f"日付(JST): {day} / 季節: {season} / ページ: {len(ALL_PAGES)}枚")
 
     daily_at, daily = fetch_daily()
     if daily_at.hour < EARLIEST_HOUR:
@@ -1467,9 +1962,23 @@ def main():
         view = view_of(g, obs_day.month)
         guides[g["id"]] = (view, summarize_guide(g, view, heinen, daily, obs_day))
 
+    # 灯油：新しい月が公表されていれば足す。取れなくても前の値でページを作り、ここでは止めない
+    with open(TOUYU_FILE, encoding="utf-8") as f:
+        touyu = json.load(f)
+    touyu_changed, touyu_notes = update_touyu(touyu, now_jst.date())
+    for note in touyu_notes:
+        print(f"  ※ 灯油: {note}")
+    warnings = []
+    stale = touyu_stale_days(touyu, now_jst.date())
+    if stale > TOUYU_STALE_DAYS:
+        warnings.append(f"灯油の値段が新しくなっていません（いちばん新しいのは{month_text(max(touyu['months']))}分・"
+                        f"月末から{stale}日）。" + " / ".join(touyu_notes))
+    touyu_latest, touyu_rows = summarize_touyu(touyu)
+
     # 同じ言葉は1回だけ取りに行く。続けて叩くと止められるため間を空ける。
     keyword_sets = [(m["id"], by_season(m["keywords"], season)) for m in METRICS]
     keyword_sets += [(g["id"], g["keywords"]) for g in GUIDES]
+    keyword_sets += [(TOUYU["id"], TOUYU["keywords"])]
     pools = {}
     for _, words in keyword_sets:
         for kw in words:
@@ -1491,11 +2000,13 @@ def main():
     for g in GUIDES:
         view, rows = guides[g["id"]]
         proses[g["id"]] = guide_prose(g, view, rows)
+    proses[TOUYU["id"]] = touyu_prose(touyu, touyu_latest, touyu_rows)
 
     problems = run_checks({
         "now": now_jst, "age": age, "daily_at": daily_at, "by_pref": by_pref,
         "obs": obs, "daily": daily, "results": results, "heinen": heinen,
         "guides": {k: v[1] for k, v in guides.items()}, "items": items, "proses": proses,
+        "touyu": touyu,
     })
 
     print(f"アメダス: {obs_at:%Y-%m-%d %H:%M}（{age:.0f}分前） / 最高・最低気温: "
@@ -1512,6 +2023,8 @@ def main():
         seen = sum(1 for r in rows if r["today"] is not None)
         print(f"  {g['name']}（{view['label']}）: 目安の日 {dated}県 / その日の観測 {seen}県 / "
               f"商品{len(items[g['id']])}件")
+    print(f"  灯油: {month_text(touyu_latest)}分 / {sum(1 for r in touyu_rows if r['val'] is not None)}市 / "
+          f"東京都区部の推移 {max(touyu.get('tokyo', {'-': 0}))}まで / 商品{len(items[TOUYU['id']])}件")
     if problems:
         print("--- 検査で問題を検出。公開しません ---")
         for p in problems:
@@ -1525,11 +2038,24 @@ def main():
         view, rows = guides[g["id"]]
         write(g["out"], render_guide(g, view, rows, items[g["id"]], proses[g["id"]],
                                      daily_at, heinen))
-    write(OUT_TOP, render_top(obs_at, results, season, guides, daily_at))
+    write(TOUYU["out"], render_touyu(touyu, touyu_latest, touyu_rows, items[TOUYU["id"]],
+                                     proses[TOUYU["id"]]))
+    write(OUT_TOP, render_top(obs_at, results, season, guides, daily_at,
+                              (touyu, touyu_latest, touyu_rows)))
     write(OUT_SITEMAP, render_sitemap(obs_day.isoformat()))
-    written = ", ".join([m["out"] for m in METRICS] + [g["out"] for g in GUIDES]
-                        + [OUT_TOP, OUT_SITEMAP])
-    print(f"検査: 問題なし / 書き出し: {written}")
+    written = [p["out"] for p in ALL_PAGES] + [OUT_TOP, OUT_SITEMAP]
+    if touyu_changed:
+        write(TOUYU_FILE, json.dumps(touyu, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
+        written.append(TOUYU_FILE)
+    print(f"検査: 問題なし / 書き出し: {', '.join(written)}")
+    # ページは書いたうえで、知らせたいことがあれば残す（自動実行はこれを見て「失敗」にする）
+    if warnings:
+        write(WARN_FILE, "\n".join(warnings) + "\n")
+        print("--- 知らせたいこと ---")
+        for w in warnings:
+            print(" -", w)
+    elif os.path.exists(WARN_FILE):
+        os.remove(WARN_FILE)
 
 
 if __name__ == "__main__":

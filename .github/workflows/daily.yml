@@ -33,7 +33,7 @@ jobs:
           git config user.name "kisetsukago-bot"
           git config user.email "contact@kisetsukago.com"
           # まだ一度も書き出されていないページがあっても止まらないよう、あるものだけ登録する
-          for p in index.html sitemap.xml kion uryo fusoku shitsudo danbou koromogae; do
+          for p in index.html sitemap.xml kion uryo fusoku shitsudo danbou koromogae touyu data/touyu.json; do
             if [ -e "$p" ]; then git add "$p"; fi
           done
           if git diff --cached --quiet; then
@@ -43,3 +43,12 @@ jobs:
           git commit -m "トップページと各ページを更新"
           git push
           echo "公開しました"
+
+      # 灯油の値段が長く新しくならないなど、知らせたいことがあるときは、公開したあとで「失敗」にする
+      # （ページは更新されたまま。GitHub から失敗の知らせが届く）
+      - name: 知らせたいことがあれば失敗にする
+        run: |
+          if [ -s build_warnings.txt ]; then
+            cat build_warnings.txt
+            exit 1
+          fi
