@@ -1,0 +1,28 @@
+name: watch
+
+# 見張り：本番のトップページの観測の日付が2日続けて新しくなっていなければ失敗にする（GitHub から失敗のメールが届く）。
+# daily.yml が動かなかった日にも気づけるよう、daily とは別の時刻に動かす。中身は scripts/watch.py。
+on:
+  schedule:
+    # 14:30 UTC＝日本時間 23:30（米国東部 夏時間 10:30／冬時間 9:30）。GitHub の都合で数時間遅れることがある
+    - cron: "30 14 * * *"
+  workflow_dispatch:
+  # 見張りの中身を直したときは、その場で一度動かして確かめる
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/watch.yml"
+      - "scripts/watch.py"
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: トップページの観測の日付を確かめる
+        run: python3 scripts/watch.py
