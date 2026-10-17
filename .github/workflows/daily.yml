@@ -33,7 +33,7 @@ jobs:
           git config user.name "kisetsukago-bot"
           git config user.email "contact@kisetsukago.com"
           # まだ一度も書き出されていないページがあっても止まらないよう、あるものだけ登録する
-          for p in index.html sitemap.xml kion uryo fusoku shitsudo danbou koromogae touyu data/touyu.json; do
+          for p in index.html sitemap.xml kion uryo fusoku shitsudo danbou koromogae touyu yomimono data/touyu.json; do
             if [ -e "$p" ]; then git add "$p"; fi
           done
           if git diff --cached --quiet; then

@@ -350,7 +350,30 @@ TOUYU = {
     "keywords": ["石油ファンヒーター", "灯油ポンプ", "灯油タンク"],
 }
 
-ALL_PAGES = METRICS + GUIDES + [TOUYU]
+# ---------- 読み物（蓄積記事） ----------
+# 手持ちのデータで1つの問いに答える読み物。毎日の観測のページと違い、言い回しは固定のまま、
+# 数字だけを毎回データから計算し直す（新しい月の値段が入ると自動で増える）。
+# 言い回しが成り立たなくなったら（例：夏がいちばん安い年が半分を超えた）、検査で止めて知らせる。
+TOUYU_YASUI = {
+    "id": "touyu-yasui-jiki",
+    "out": "yomimono/touyu-yasui-jiki/index.html",
+    "path": "/yomimono/touyu-yasui-jiki/",
+    "name": "灯油の安い月",
+    "h1": "灯油は何月が安い？",
+    "title": "灯油は何月が安い？総務省の2008年からの値段では「夏が安い」とは言えなかった",
+    "desc": "「灯油は夏が安い」は本当か。総務省の小売物価統計調査の灯油18リットルの値段"
+            "（東京都区部は2008年11月から、47都道府県の県庁所在市は2020年から）で、その年いちばん安かった月を数えました。",
+    "lead": "「灯油は夏が安い」は本当か。総務省の2008年からの値段で、その年いちばん安かった月を数えました。",
+    "heading": "灯油を使う季節に選ばれているもの",
+    "keywords": ["灯油ポンプ", "灯油タンク", "石油ファンヒーター"],
+    "published": "2026-10-18",
+}
+YOMIMONO = [TOUYU_YASUI]
+SUMMER_MONTHS = (6, 7, 8)
+KOURI_HANASHI = "https://www.stat.go.jp/data/kouri/handbook/pdf/hanashi05_2026.pdf"
+TOYOTOMI_MANUAL = "https://www.toyotomi.jp/manual/operation/LC-32P.pdf"
+
+ALL_PAGES = METRICS + GUIDES + [TOUYU] + YOMIMONO
 
 
 # ---------- 取得 ----------
@@ -1094,6 +1117,217 @@ def tokyo_chart_svg(tokyo):
             f"<title>{title}</title>{''.join(parts)}</svg>")
 
 
+# ---------- 読み物：灯油は何月が安い？ ----------
+
+def full_years(series):
+    """{"YYYY-MM": 値} を {年: {月: 値}} にする。12か月そろった年だけ。"""
+    years = {}
+    for key, v in series.items():
+        if v is not None:
+            years.setdefault(int(key[:4]), {})[int(key[5:7])] = v
+    return {y: r for y, r in years.items() if len(r) == 12}
+
+
+def low_high(row):
+    """その年でいちばん安い月・高い月（同じ値が並んだら全部）と、その値。"""
+    lo, hi = min(row.values()), max(row.values())
+    return ([m for m in sorted(row) if row[m] == lo], lo, [m for m in sorted(row) if row[m] == hi], hi)
+
+
+def month_counts_text(counts):
+    """{月: 回数} を「1月が8回、8月が3回、2月・12月が2回」の形にする（多い順・0回は書かない）。"""
+    by_n = {}
+    for m, n in counts.items():
+        if n:
+            by_n.setdefault(n, []).append(m)
+    return "、".join("・".join(f"{m}月" for m in sorted(ms)) + f"が{n}回"
+                    for n, ms in sorted(by_n.items(), reverse=True))
+
+
+def years_text(years):
+    """[2010, 2011, 2012, 2018] を「2010〜2012・2018年」の形にする。"""
+    ys = sorted(years)
+    if not ys:
+        return ""
+    parts, start, prev = [], ys[0], ys[0]
+    for y in ys[1:] + [None]:
+        if y is not None and y == prev + 1:
+            prev = y
+            continue
+        parts.append(f"{start}" if start == prev else f"{start}〜{prev}")
+        if y is not None:
+            start = prev = y
+    return "・".join(parts) + "年"
+
+
+def touyu_month_stats(data):
+    """東京都区部と47市で、その年いちばん安かった月を数える（12か月そろった年だけ）。"""
+    tokyo = full_years(data.get("tokyo", {}))
+    t_rows = []
+    t_count = {m: 0 for m in range(1, 13)}
+    for y in sorted(tokyo):
+        lo_m, lo, hi_m, hi = low_high(tokyo[y])
+        t_rows.append({"year": y, "lo_m": lo_m, "lo": lo, "hi_m": hi_m, "hi": hi})
+        for m in lo_m:
+            t_count[m] += 1
+    jan_low = [r["year"] for r in t_rows if 1 in r["lo_m"]]
+    jan_high = [r["year"] for r in t_rows if 1 in r["hi_m"]]
+
+    cities = {}
+    for key, prices in data.get("months", {}).items():
+        for code, v in prices.items():
+            cities.setdefault(code, {})[key] = v
+    c_count = {m: 0 for m in range(1, 13)}
+    c_n = c_summer = 0
+    c_years = set()
+    for series in cities.values():
+        for y, row in full_years(series).items():
+            lo_m = low_high(row)[0]
+            c_n += 1
+            c_years.add(y)
+            c_summer += any(m in SUMMER_MONTHS for m in lo_m)
+            for m in lo_m:
+                c_count[m] += 1
+
+    # 47市の平均の値段が、その年の12か月の平均より高いか安いか（年ごと・月ごと）
+    avg_by_key = {k: sum(p.values()) / len(p) for k, p in data.get("months", {}).items() if p}
+    dev = {}
+    for y, row in full_years(avg_by_key).items():
+        mean = sum(row.values()) / 12
+        dev[y] = {m: round(v - mean) for m, v in row.items()}
+    dev_avg = {m: round(sum(d[m] for d in dev.values()) / len(dev)) for m in range(1, 13)} if dev else {}
+    both_signs = sum(1 for m in range(1, 13)
+                     if any(d[m] > 0 for d in dev.values()) and any(d[m] < 0 for d in dev.values()))
+
+    return {
+        "t_rows": t_rows, "t_count": t_count,
+        "t_ties": [r["year"] for r in t_rows if len(r["lo_m"]) > 1],
+        "t_summer": sum(1 for r in t_rows if any(m in SUMMER_MONTHS for m in r["lo_m"])),
+        "jan_low": jan_low,
+        "jan_low_rising": [y for y in jan_low if tokyo[y][12] > tokyo[y][1]],
+        "jan_high": jan_high,
+        "jan_high_falling": [y for y in jan_high if tokyo[y][12] < tokyo[y][1]],
+        "c_count": c_count, "c_n": c_n, "c_summer": c_summer,
+        "c_years": (min(c_years), max(c_years)) if c_years else None,
+        "dev": dev, "dev_avg": dev_avg, "both_signs": both_signs,
+        "c_rising": sum(1 for d in dev.values() if d[12] > d[1]),
+    }
+
+
+def signed(v, digits=0):
+    """＋−つきの数字。マイナスは「−」にする（表と本文で読みやすくするため）。"""
+    text = f"{v:+,.{digits}f}" if digits else f"{round(v):+,}"
+    return text.replace("-", "−")
+
+
+def touyu_yasui_text(st, data):
+    """読み物の本文。言い回しは固定で、データが増えると変わるのは年と数字だけ。"""
+    rows = st["t_rows"]
+    n = len(rows)
+    counts = st["t_count"]
+    ties = "、".join(f"{r['year']}年は" + "と".join(f"{m}月" for m in r["lo_m"])
+                    for r in rows if len(r["lo_m"]) > 1)
+    tie_note = f"（{ties}が同じ値で並んだため、それぞれに数えています）" if ties else ""
+    lede = ("総務省の灯油の値段からは、季節で決まる「安い月」は読み取れませんでした。"
+            f"東京都区部の{rows[0]['year']}年から{rows[-1]['year']}年までの{n}年で、その年いちばん安かった月を数えると、"
+            f"{month_counts_text(counts)}でした{tie_note}。"
+            f"6〜8月（夏）がいちばん安かった年は{st['t_summer']}年だけです。")
+    if max(counts, key=counts.get) == 1 and len(st["jan_low_rising"]) == len(st["jan_low"]):
+        lede += "いちばん多い1月は、どれも1年を通して値上がりした年でした。"
+    text = {"lede": lede}
+
+    jl, jh, jf = st["jan_low"], st["jan_high"], st["jan_high_falling"]
+    jan = ""
+    if jl:
+        jan = (f"1月がいちばん安かった{len(jl)}年（{years_text(jl)}）は、"
+               + ("どれも" if len(st["jan_low_rising"]) == len(jl) else f"そのうち{len(st['jan_low_rising'])}年が")
+               + "1年のはじめ（1月）より終わり（12月）のほうが高い、値上がりの年でした。")
+        if jh:
+            jan += (f"反対に、1月がその年でいちばん高かった{len(jh)}年（{years_text(jh)}）は、"
+                    + ("どれも" if len(jf) == len(jh) else f"そのうち{len(jf)}年が")
+                    + "12月のほうが1月より安い、値下がりの年でした。")
+            if len(jf) == len(jh):
+                jan += "いちばん安い月がどこに来るかは、季節よりも、その年に値段が上がったか下がったかで変わっていました。"
+    text["jan"] = jan
+
+    pct = round(100 * st["c_summer"] / st["c_n"]) if st["c_n"] else 0
+    city = ""
+    if st["c_n"]:
+        y0, y1 = st["c_years"]
+        top = max(st["c_count"], key=st["c_count"].get)
+        top_pct = round(100 * st["c_count"][top] / st["c_n"])
+        city = (f"47都道府県の県庁所在市それぞれの{y0}年から{y1}年まで（{st['c_n']}の組み合わせ）で数えると、"
+                f"その年いちばん安い月（同じ値で並んだ月を含む）に6〜8月が入っていたのは{st['c_summer']}（{pct}％）でした。"
+                f"いちばん多かったのは{top}月で、{st['c_count'][top]}（{top_pct}％）です。")
+        if top == 1 and st["c_rising"] * 2 > len(st["dev"]):
+            city += (f"この{len(st['dev'])}年のうち{st['c_rising']}年は、47市の平均で12月のほうが1月より高い"
+                     "値上がりの年で、東京都区部と同じ形です。")
+    text["city"] = city
+
+    dv = st["dev_avg"]
+    dev_note = ""
+    if dv:
+        lo_m, hi_m = min(dv, key=dv.get), max(dv, key=dv.get)
+        each = ("どの月も、年によって＋の年と−の年の両方がありました。" if st["both_signs"] == 12
+                else f"12か月のうち{st['both_signs']}か月は、年によって＋の年と−の年の両方がありました。")
+        dev_note = ("＋はその年の12か月の平均より高い月、−は安い月です（47市の平均の値段・当サイトの計算）。"
+                    + each
+                    + f"{len(st['dev'])}年の平均にすると、いちばん安い側の{lo_m}月でも{signed(dv[lo_m])}円、"
+                    f"いちばん高い側の{hi_m}月でも{signed(dv[hi_m])}円で、"
+                    f"1リットルあたりにすると{signed(dv[lo_m] / 18, 1)}円から{signed(dv[hi_m] / 18, 1)}円です。")
+    text["dev"] = dev_note
+
+    text["summer"] = (f"上のとおり、夏（6〜8月）がいちばん安かった年は、東京都区部で{n}年のうち{st['t_summer']}年でした。"
+                      f"47市でも、いちばん安い月に6〜8月が入っていたのは{pct}％です。"
+                      "灯油の保管について、トヨトミの石油ファンヒーター（LC-32P）の取扱説明書は"
+                      "「翌シーズンに持ち越さないようにしてください。」と書いています。")
+
+    latest = max(data["months"])
+    avg_now = average(data["months"][latest].values())
+    now = f"{month_text(latest)}分の47市の平均は{avg_now:,}円です"
+    jan_key = f"{latest[:4]}-01"
+    if latest != jan_key and jan_key in data["months"]:
+        now += (f"（{latest[:4]}年1月分は{average(data['months'][jan_key].values()):,}円）")
+    text["now"] = now + "。"
+
+    brand = data.get("local_brand", {}).get(latest) or []
+    text["brand"] = ""
+    if brand:
+        names = "・".join(CAPITALS[c][0] for c in brand if c in CAPITALS)
+        text["brand"] = (f"{month_text(latest)}分の{names}の値は、基本の銘柄の出回りが少ないため、"
+                         "総務省がその市の実情に合わせて決めた銘柄の値です（総務省の注記）。")
+    return text
+
+
+def touyu_yasui_problems(st):
+    """本文の言い回しが、いまのデータで成り立つか。
+
+    成り立たないときは、この読み物だけ書き換えずに前の版を残し、ほかのページは公開したうえで知らせる
+    （main で warnings に入れる。自動実行が「失敗」になり、GitHub からメールが届く）。
+    """
+    problems = []
+    n = len(st["t_rows"])
+    name = "読み物「灯油は何月が安い？」"
+    if n < 10:
+        problems.append(f"{name}：東京都区部の12か月そろった年が少ない（{n}年）")
+        return problems
+    if st["t_summer"] * 2 >= n:
+        problems.append(f"{name}：東京都区部で夏がいちばん安い年が半分以上（{st['t_summer']}/{n}年）。題名と本文を見直す")
+    if not st["c_n"]:
+        problems.append(f"{name}：47市の12か月そろった年が無い")
+    elif st["c_summer"] * 2 >= st["c_n"]:
+        problems.append(f"{name}：47市で夏がいちばん安い組み合わせが半分以上。題名と本文を見直す")
+    for m, c in st["t_count"].items():
+        # 1月は値上がりの年にいちばん安くなるので、値下がりの年に1月がいちばん高い例がある限り、多くても説明がつく
+        if c * 2 > n and (m != 1 or not st["jan_high"]):
+            problems.append(f"{name}：東京都区部で{m}月がいちばん安い年が半分を超えた（{c}/{n}年）。"
+                            "「季節で決まる安い月は読み取れない」を見直す")
+    if len(st["jan_high_falling"]) < len(st["jan_high"]):
+        problems.append(f"{name}：1月がいちばん高かった年に、値下がりでない年がある。"
+                        "「上がったか下がったかで変わっていた」を見直す")
+    return problems
+
+
 # ---------- 地図 ----------
 
 def short_pref(name):
@@ -1790,6 +2024,9 @@ def render_touyu(data, latest, rows, items, prose):
   {brand_note}
   <p class="note">値段は総務省統計局の小売物価統計調査（毎月1回）によるもので、灯油は「白灯油，詰め替え売り，店頭売り」の18リットルの値段です。出典：総務省統計局「小売物価統計調査（動向編）」主要品目の都市別小売価格（<a href="https://www.e-stat.go.jp/" rel="noopener">政府統計の総合窓口 e-Stat</a>）を加工して作成。</p>
 {history}
+  <h2>読み物</h2>
+  <ul class="links"><li><a href="{TOUYU_YASUI['path']}">{e(TOUYU_YASUI['h1'])}</a>（この値段で、その年いちばん安かった月を数えました）</li></ul>
+
   <h2>毎週の値段（都道府県別）</h2>
   <p class="note">最新の週ごとの値段（都道府県別）は、資源エネルギー庁の「石油製品価格調査」で毎週公表されています。</p>
   <ul class="links"><li><a href="{WEEKLY_OFFICIAL}" rel="noopener">資源エネルギー庁 石油製品価格調査 調査の結果</a></li></ul>
@@ -1799,6 +2036,74 @@ def render_touyu(data, latest, rows, items, prose):
   <p class="note">{ITEMS_NOTE}</p>
 """
     return page_html(TOUYU, body)
+
+
+def render_touyu_yasui(page, data, st, items, text):
+    """読み物「灯油は何月が安い？」。数字と表はデータから毎回作る。"""
+    e = html.escape
+    tokyo, months = data["tokyo"], data["months"]
+    stamp = (f"総務省 小売物価統計調査（動向編）の灯油18リットルの値段（東京都区部 {month_text(min(tokyo))}〜"
+             f"{month_text(max(tokyo))}分・47都道府県の県庁所在市 {month_text(min(months))}〜{month_text(max(months))}分）"
+             f"をもとに当サイトが計算／公開 {iso_text(page['published'])}")
+
+    def cell(ms, v):
+        return "・".join(f"{m}月" for m in ms) + f'<span class="sub">{v:,}円</span>'
+
+    rows = st["t_rows"]
+    t_body = "".join(f'<tr><th scope="row">{r["year"]}年</th><td>{cell(r["lo_m"], r["lo"])}</td>'
+                     f'<td>{cell(r["hi_m"], r["hi"])}</td><td>{r["hi"] - r["lo"]:,}円</td></tr>' for r in rows)
+    years = sorted(st["dev"])
+    d_head = "".join(f'<th scope="col">{y}年</th>' for y in years)
+    d_body = "".join(
+        f'<tr><th scope="row">{m}月</th>' + "".join(f"<td>{signed(st['dev'][y][m])}</td>" for y in years)
+        + f"<td>{signed(st['dev_avg'][m])}</td></tr>" for m in range(1, 13))
+
+    body = f"""  <p class="stamp">{e(stamp)}</p>
+
+  <p class="lede">{e(text['lede'])}</p>
+
+  <h2>東京都区部　その年いちばん安い月と高い月（{rows[0]['year']}〜{rows[-1]['year']}年）</h2>
+  <table class="cols">
+    <caption>灯油18リットルの店頭価格。同じ値の月が並んだ年は、その月をすべて書いています（当サイトの集計）</caption>
+    <thead><tr><th scope="col">年</th><th scope="col">いちばん安い月</th><th scope="col">いちばん高い月</th><th scope="col">差</th></tr></thead>
+    <tbody>
+      {t_body}
+    </tbody>
+  </table>
+
+  <h2>いちばん安い月が1月の年が多いのは</h2>
+  <p>{e(text['jan'])}</p>
+
+  <h2>47都道府県の県庁所在市では</h2>
+  <p>{e(text['city'])}</p>
+  <div class="mapwrap">
+  <table class="cols">
+    <caption>47市の平均の値段の、その年の12か月の平均との差（円・18リットル）</caption>
+    <thead><tr><th scope="col">月</th>{d_head}<th scope="col">平均</th></tr></thead>
+    <tbody>
+      {d_body}
+    </tbody>
+  </table>
+  </div>
+  <p class="note">{e(text['dev'])}</p>
+
+  <h2>夏にまとめて買えば安い？</h2>
+  <p>{e(text['summer'])}</p>
+  <ul class="links"><li><a href="{TOYOTOMI_MANUAL}" rel="noopener">トヨトミ LC-32P 取扱説明書（PDF）</a></li></ul>
+
+  <h2>いまの値段</h2>
+  <p>{e(text['now'])}都道府県別の最新の値段と前の月からの値動きは、毎月入れ替えている<a href="{TOUYU['path']}">{e(TOUYU['h1'])}</a>のページにあります。週ごとの値段は、資源エネルギー庁の「石油製品価格調査」で毎週公表されています。</p>
+  <ul class="links"><li><a href="{WEEKLY_OFFICIAL}" rel="noopener">資源エネルギー庁 石油製品価格調査 調査の結果</a></li></ul>
+
+  <h2>調べ方と出典</h2>
+  <p class="note">値段は総務省統計局「小売物価統計調査（動向編）」の灯油（「白灯油，詰め替え売り，店頭売り」・18リットル）です。総務省の説明では、月ごとの値段は「原則として、毎月12日を含む週の水曜日、木曜日又は金曜日のいずれか１日を調査日としています。」（<a href="{KOURI_HANASHI}" rel="noopener">小売物価統計調査のはなし（PDF）</a>）。月に1回の値なので、その月の中の上がり下がりは表れません。{e(text['brand'])}12か月そろった年だけを数え、いちばん安い月・高い月と平均は当サイトの計算です。</p>
+  <p class="note">出典：総務省統計局「小売物価統計調査（動向編）」主要品目の都市別小売価格、東京都区部の灯油の小売価格（長期時系列）（<a href="https://www.e-stat.go.jp/" rel="noopener">政府統計の総合窓口 e-Stat</a>）を加工して作成。</p>
+
+  <h2>{e(page['heading'])}</h2>
+  {items_html(page['keywords'], items)}
+  <p class="note">{ITEMS_NOTE}</p>
+"""
+    return page_html(page, body)
 
 
 def render_top(obs_at, results, season, guides, daily_at, touyu):
@@ -1852,6 +2157,13 @@ def render_top(obs_at, results, season, guides, daily_at, touyu):
       </a>
     </li>""")
     pages_html = "\n".join(entries)
+    yomi_html = "\n".join(f"""    <li>
+      <a class="entry" href="{p['path']}">
+        <span class="t">{html.escape(p['h1'])}</span>
+        <span class="d">{html.escape(p['lead'])}</span>
+        <span class="d">公開 {iso_text(p['published'])}／データが増えると数字を自動で計算し直します</span>
+      </a>
+    </li>""" for p in YOMIMONO)
 
     return f"""<!DOCTYPE html>
 <html lang="ja">
@@ -1878,6 +2190,11 @@ def render_top(obs_at, results, season, guides, daily_at, touyu):
   <h2>いま見られるページ</h2>
   <ul class="pages">
 {pages_html}
+  </ul>
+
+  <h2>読み物</h2>
+  <ul class="pages">
+{yomi_html}
   </ul>
 
   <h2>これから増やす予定のページ</h2>
@@ -1979,6 +2296,7 @@ def main():
     keyword_sets = [(m["id"], by_season(m["keywords"], season)) for m in METRICS]
     keyword_sets += [(g["id"], g["keywords"]) for g in GUIDES]
     keyword_sets += [(TOUYU["id"], TOUYU["keywords"])]
+    keyword_sets += [(p["id"], p["keywords"]) for p in YOMIMONO]
     pools = {}
     for _, words in keyword_sets:
         for kw in words:
@@ -2001,6 +2319,10 @@ def main():
         view, rows = guides[g["id"]]
         proses[g["id"]] = guide_prose(g, view, rows)
     proses[TOUYU["id"]] = touyu_prose(touyu, touyu_latest, touyu_rows)
+    # 読み物：数字は毎回データから計算し、言い回しが成り立たなければ検査で止める
+    yasui_stats = touyu_month_stats(touyu)
+    yasui_text = touyu_yasui_text(yasui_stats, touyu)
+    proses[TOUYU_YASUI["id"]] = "".join(yasui_text.values())
 
     problems = run_checks({
         "now": now_jst, "age": age, "daily_at": daily_at, "by_pref": by_pref,
@@ -2008,6 +2330,8 @@ def main():
         "guides": {k: v[1] for k, v in guides.items()}, "items": items, "proses": proses,
         "touyu": touyu,
     })
+    # 読み物の言い回しが成り立たないときは、その読み物だけ書き換えずに知らせる（ほかのページは止めない）
+    yasui_problems = touyu_yasui_problems(yasui_stats)
 
     print(f"アメダス: {obs_at:%Y-%m-%d %H:%M}（{age:.0f}分前） / 最高・最低気温: "
           f"{daily_at:%Y-%m-%d %H:%M}まで / 都道府県: {len(by_pref)}")
@@ -2025,6 +2349,8 @@ def main():
               f"商品{len(items[g['id']])}件")
     print(f"  灯油: {month_text(touyu_latest)}分 / {sum(1 for r in touyu_rows if r['val'] is not None)}市 / "
           f"東京都区部の推移 {max(touyu.get('tokyo', {'-': 0}))}まで / 商品{len(items[TOUYU['id']])}件")
+    print(f"  読み物「{TOUYU_YASUI['h1']}」: 東京都区部 {len(yasui_stats['t_rows'])}年 / "
+          f"47市 {yasui_stats['c_n']}組 / 商品{len(items[TOUYU_YASUI['id']])}件")
     if problems:
         print("--- 検査で問題を検出。公開しません ---")
         for p in problems:
@@ -2040,10 +2366,17 @@ def main():
                                      daily_at, heinen))
     write(TOUYU["out"], render_touyu(touyu, touyu_latest, touyu_rows, items[TOUYU["id"]],
                                      proses[TOUYU["id"]]))
+    written = [p["out"] for p in METRICS + GUIDES + [TOUYU]]
+    if yasui_problems:
+        warnings += yasui_problems
+    else:
+        write(TOUYU_YASUI["out"], render_touyu_yasui(TOUYU_YASUI, touyu, yasui_stats,
+                                                     items[TOUYU_YASUI["id"]], yasui_text))
+        written.append(TOUYU_YASUI["out"])
     write(OUT_TOP, render_top(obs_at, results, season, guides, daily_at,
                               (touyu, touyu_latest, touyu_rows)))
     write(OUT_SITEMAP, render_sitemap(obs_day.isoformat()))
-    written = [p["out"] for p in ALL_PAGES] + [OUT_TOP, OUT_SITEMAP]
+    written += [OUT_TOP, OUT_SITEMAP]
     if touyu_changed:
         write(TOUYU_FILE, json.dumps(touyu, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
         written.append(TOUYU_FILE)
