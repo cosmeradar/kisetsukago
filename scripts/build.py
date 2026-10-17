@@ -291,8 +291,8 @@ GUIDES = [
         "name": "暖房",
         "h1": "暖房はいつから？いつまで？",
         "title": "暖房はいつから？いつまで？都道府県別の目安（平年の最低気温）",
-        "desc": "気象庁の平年値をもとに、朝の最低気温が15℃・10℃・5℃を下回る時期（春は上回る時期）を"
-                "47都道府県で並べています。その日の最低気温と平年差も毎日入れ替わります。",
+        "desc": "ストーブやこたつを出す時期を考える材料に。気象庁の平年値をもとに、朝の最低気温が15℃・10℃・5℃を"
+                "下回る時期（春は上回る時期）を47都道府県で並べています。その日の最低気温と平年差も毎日入れ替わります。",
         "element": "tmin",
         "element_label": "最低気温",
         "element_text": "朝の最低気温",
@@ -302,7 +302,7 @@ GUIDES = [
             {"months": (1, 2, 3, 4, 5), "label": "いつまで（冬から春）", "dir": "up",
              "thresholds": [5.0, 10.0, 15.0], "main": 10.0, "order_from": (1, 1), "invert": True},
         ],
-        "note": "暖房を使い始める時期や使い終える時期は、住まいのつくりや体感によって人それぞれです。"
+        "note": "暖房（エアコン・ストーブ・こたつ）を使い始める時期や使い終える時期は、住まいのつくりや体感によって人それぞれです。"
                 "このページは、判断の材料として、決まった気温を下回る（春は上回る）時期を"
                 "平年値から機械的に求めて並べたものです。表の日付は平年の値で、その年の天候によって前後します。",
         "heading": "暖房の季節に選ばれているもの",
@@ -368,7 +368,25 @@ TOUYU_YASUI = {
     "keywords": ["灯油ポンプ", "灯油タンク", "石油ファンヒーター"],
     "published": "2026-10-18",
 }
-YOMIMONO = [TOUYU_YASUI]
+SAMUI_KEN = {
+    "id": "samui-ken-ranking",
+    "out": "yomimono/samui-ken-ranking/index.html",
+    "path": "/yomimono/samui-ken-ranking/",
+    "name": "寒い県",
+    "h1": "寒い県ランキング",
+    "title": "寒い県ランキング｜本州で一番寒いのは？朝の冷え込みなら岩手（盛岡）、昼の寒さなら青森（県庁所在地の平年値）",
+    "desc": "気象庁の平年値（1991〜2020年）で、47都道府県の県庁所在地などの1月の最低気温・最高気温と、"
+            "冬日・真冬日の日数を比べました。本州で一番寒い県は、比べ方で岩手と青森に分かれます。",
+    "lead": "本州で一番寒い県は？気象庁の平年値で、朝の冷え込み・昼の寒さ・冬日と真冬日の日数を47都道府県で比べました。",
+    "heading": "寒い季節に選ばれているもの",
+    "keywords": ["あったかインナー", "電気毛布", "湯たんぽ"],
+    "published": "2026-10-18",
+}
+YOMIMONO = [TOUYU_YASUI, SAMUI_KEN]
+HEINEN_MONTH_FILE = "data/heinen_month.json"
+HONSHU = {f"{i:02d}" for i in range(2, 36)}  # 青森〜山口
+JMA_YOUGO_KION = "https://www.jma.go.jp/jma/kishou/know/yougo_hp/kion.html"
+JMA_ETRN = "https://www.data.jma.go.jp/stats/etrn/index.php"
 SUMMER_MONTHS = (6, 7, 8)
 KOURI_HANASHI = "https://www.stat.go.jp/data/kouri/handbook/pdf/hanashi05_2026.pdf"
 TOYOTOMI_MANUAL = "https://www.toyotomi.jp/manual/operation/LC-32P.pdf"
@@ -1328,6 +1346,97 @@ def touyu_yasui_problems(st):
     return problems
 
 
+# ---------- 読み物：寒い県ランキング ----------
+
+# (キー, 比べ方, 寒いのはどちらか, 単位)
+SAMUI_MEASURES = [
+    ("jan_tmin", "1月の日最低気温（朝の冷え込み）", "low", "℃"),
+    ("jan_tmax", "1月の日最高気温（昼の寒さ）", "low", "℃"),
+    ("jan_tavg", "1月の平均気温", "low", "℃"),
+    ("year_tavg", "1年の平均気温", "low", "℃"),
+    ("fuyubi", "冬日の日数（1年）", "high", "日"),
+    ("mafuyubi", "真冬日の日数（1年）", "high", "日"),
+]
+
+
+def load_heinen_month():
+    with open(HEINEN_MONTH_FILE, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def samui_rows(hm):
+    """月ごとの平年値から、比べ方ごとの値を1地点1行にする。"""
+    rows = []
+    for code, s in sorted(hm.get("stations", {}).items()):
+        jan, year = s["months"]["1"], s["year"]
+        rows.append({"code": code, "pref": s["pref"], "name": s["name"],
+                     "jan_tmin": jan["tmin"], "jan_tmax": jan["tmax"], "jan_tavg": jan["tavg"],
+                     "year_tavg": year["tavg"], "fuyubi": year["d_min_lt0"], "mafuyubi": year["d_max_lt0"]})
+    return rows
+
+
+def coldest(rows, key, way):
+    """いちばん寒い地点（同じ値が並んだら全部）と、その値。"""
+    best = min(r[key] for r in rows) if way == "low" else max(r[key] for r in rows)
+    return [r for r in rows if r[key] == best], best
+
+
+def place_text(rs):
+    return "・".join(f"{r['pref']}（{r['name']}）" for r in rs)
+
+
+def value_text(v, unit):
+    return f"{v:.1f}".replace("-", "−") + unit
+
+
+def samui_text(rows):
+    """読み物の本文。平年値は10年ごとにしか変わらないが、数字はいつもデータから作る。"""
+    honshu = [r for r in rows if r["code"] in HONSHU]
+    win = {key: coldest(rows, key, way) + coldest(honshu, key, way) for key, _, way, _ in SAMUI_MEASURES}
+    text = {}
+    lede = "比べ方によって変わります。気象庁の平年値（1991〜2020年）で、47都道府県の県庁所在地など1地点ずつを比べました。"
+    national = {tuple(r["code"] for r in w[0]) for w in win.values()}
+    if len(national) == 1:
+        lede += f"全国では、どの比べ方でも{place_text(win['jan_tmin'][0])}がいちばん寒い地点です。"
+    t_min, t_max, f_d, m_d = win["jan_tmin"], win["jan_tmax"], win["fuyubi"], win["mafuyubi"]
+    lede += (f"本州に限ると、朝の冷え込み（1月の日最低気温の平年値）は{place_text(t_min[2])}の{value_text(t_min[3], '℃')}、"
+             f"昼の寒さ（1月の日最高気温の平年値）は{place_text(t_max[2])}の{value_text(t_max[3], '℃')}がいちばん低く、"
+             f"答えが分かれます。1年の冬日（最低気温が0℃未満の日）がいちばん多いのは{place_text(f_d[2])}の{value_text(f_d[3], '日')}、"
+             f"真冬日（最高気温が0℃未満の日）がいちばん多いのは{place_text(m_d[2])}の{value_text(m_d[3], '日')}です。")
+    text["lede"] = lede
+    gap = ""
+    if f_d[0][0]["code"] != f_d[2][0]["code"] and f_d[1] - f_d[3] < 1:
+        gap = (f"冬日の日数は、全国でいちばん多い{place_text(f_d[0])}の{value_text(f_d[1], '日')}と、"
+               f"{place_text(f_d[2])}の{value_text(f_d[3], '日')}で、ほとんど同じです。")
+    text["gap"] = gap
+
+    differ = [r for r in rows
+              if r["name"] not in CAPITALS.get(r["code"], ("", ()))[0]
+              and r["name"] not in CAPITALS.get(r["code"], ("", ()))[1]]
+    point = "比べているのは、各都道府県の気象台などの観測点1か所の平年値です。"
+    if differ:
+        point += ("・".join(f"{r['pref']}は{r['name']}" for r in differ)
+                  + "の値です（県庁所在地ではなく、その市に地方気象台があるため）。")
+    point += ("同じ都道府県の中でも、山あいや内陸には、ここに並べた値より寒い地点があります。"
+              "平年値は30年間の平均なので、その年の冬の寒さは年によって前後します。")
+    text["point"] = point
+    text["defs"] = "冬日・真冬日は気象庁の用語で、冬日は「日最低気温が０度未満の日。」、真冬日は「日最高気温が０度未満の日。」です。"
+    return text, win
+
+
+def samui_problems(rows, win):
+    """題名と本文の言い回しが、いまのデータで成り立つか。成り立たなければ、この読み物だけ書き換えずに知らせる。"""
+    name = "読み物「寒い県ランキング」"
+    if len(rows) != 47:
+        return [f"{name}：月ごとの平年値が47地点そろわない（{len(rows)}）"]
+    problems = []
+    if [r["code"] for r in win["jan_tmin"][2]] != ["03"]:
+        problems.append(f"{name}：本州で1月の日最低気温がいちばん低いのが岩手（盛岡）でない。題名を見直す")
+    if [r["code"] for r in win["jan_tmax"][2]] != ["02"]:
+        problems.append(f"{name}：本州で1月の日最高気温がいちばん低いのが青森でない。題名を見直す")
+    return problems
+
+
 # ---------- 地図 ----------
 
 def short_pref(name):
@@ -1556,7 +1665,8 @@ GA = f"""<script async src="https://www.googletagmanager.com/gtag/js?id={GA_ID}"
   function gtag(){{dataLayer.push(arguments);}}
   gtag('js', new Date());
   gtag('config', '{GA_ID}');
-</script>"""
+</script>
+<script src="/assets/track.js" defer></script>"""
 
 CSS_COMMON = """
   :root{
@@ -1947,6 +2057,7 @@ def render_guide(guide, view, rows, items, prose, daily_at, heinen):
 
 
 TOUYU_MAP = {"name": "灯油18リットルの値段", "scale": ("heat",), "digits": 0, "unit": "円"}
+SAMUI_MAP = {"name": "1月の日最低気温の平年値", "scale": ("heat",), "digits": 1, "unit": "℃"}
 
 
 def signed_yen(v):
@@ -2106,6 +2217,74 @@ def render_touyu_yasui(page, data, st, items, text):
     return page_html(page, body)
 
 
+def render_samui(page, rows, items, text, win):
+    """読み物「寒い県ランキング」。表と地図は月ごとの平年値から毎回作る。"""
+    e = html.escape
+    measure = "".join(
+        f'<tr><th scope="row">{e(label)}</th><td>{e(place_text(win[key][0]))}'
+        f'<span class="sub">{value_text(win[key][1], unit)}</span></td>'
+        f'<td>{e(place_text(win[key][2]))}<span class="sub">{value_text(win[key][3], unit)}</span></td></tr>'
+        for key, label, _, unit in SAMUI_MEASURES)
+    ranked = sorted(rows, key=lambda r: (r["jan_tmin"], r["code"]))
+    lines, rank = [], 0
+    for i, r in enumerate(ranked):
+        if i == 0 or r["jan_tmin"] != ranked[i - 1]["jan_tmin"]:
+            rank = i + 1
+        lines.append(f'<tr id="p{r["code"]}"><td>{rank}</td><th scope="row">{e(r["pref"])}'
+                     f'<span class="sub">{e(r["name"])}</span></th><td>{value_text(r["jan_tmin"], "℃")}</td>'
+                     f'<td>{value_text(r["jan_tmax"], "℃")}</td><td>{value_text(r["fuyubi"], "日")}</td>'
+                     f'<td>{value_text(r["mafuyubi"], "日")}</td></tr>')
+    map_rows = [{"pref": r["pref"], "val": r["jan_tmin"]} for r in rows]
+    low, high = min(r["jan_tmin"] for r in rows), max(r["jan_tmin"] for r in rows)
+
+    body = f"""  <p class="stamp">気象庁「過去の気象データ検索」の平年値（統計期間1991〜2020年）をもとに当サイトが並べた／公開 {iso_text(page['published'])}</p>
+
+  <p class="lede">{e(text['lede'])}</p>
+
+  <h2>比べ方ごとの「いちばん寒い」（全国と本州）</h2>
+  <table class="cols">
+    <caption>県庁所在地などの観測点の平年値（1991〜2020年）。本州は青森県から山口県まで（当サイトの集計）</caption>
+    <thead><tr><th scope="col">比べ方</th><th scope="col">全国</th><th scope="col">本州</th></tr></thead>
+    <tbody>
+      {measure}
+    </tbody>
+  </table>
+  <p class="note">{e(text['gap'])}{e(text['defs'])}</p>
+
+  <h2>1月の朝の冷え込みの順位（47都道府県）</h2>
+  <div class="mapwrap">{japan_map_svg(map_rows, SAMUI_MAP, low, high)}</div>
+  <p class="mapkey"><span>{value_text(low, "℃")}</span>{legend_svg(SAMUI_MAP, low, high)}<span>{value_text(high, "℃")}</span></p>
+  <p class="note">都道府県をおおよその位置に並べたもので、実際の面積や形とは異なります。マス目の数字は1月の日最低気温の平年値（℃）です。マス目を押すと下の表の該当する行に移動します。</p>
+  <div class="mapwrap">
+  <table class="cols">
+    <caption>1月の日最低気温の平年値が低い順（同じ値は同じ順位）。冬日・真冬日は1年の日数の平年値</caption>
+    <thead><tr><th scope="col">順位</th><th scope="col">都道府県</th><th scope="col">1月の最低</th><th scope="col">1月の最高</th><th scope="col">冬日</th><th scope="col">真冬日</th></tr></thead>
+    <tbody>
+      {"".join(lines)}
+    </tbody>
+  </table>
+  </div>
+
+  <h2>「県」ではなく「1つの地点」の比べです</h2>
+  <p>{e(text['point'])}</p>
+
+  <h2>毎日の気温と、暖房の目安</h2>
+  <p>その日の最高・最低気温と平年との差は<a href="{METRICS[0]['path']}">{e(METRICS[0]['h1'])}</a>、朝の最低気温が10℃を下回る時期の平年の目安は<a href="{GUIDES[0]['path']}">{e(GUIDES[0]['h1'])}</a>で、毎日入れ替えています。</p>
+
+  <h2>調べ方と出典</h2>
+  <p class="note">値は、気象庁「過去の気象データ検索」の平年値（年・月ごとの値）の「詳細（気温・蒸気圧・湿度）」の表（統計期間1991〜2020年）です。いちばん寒い地点と順位は当サイトの集計です。冬日・真冬日の意味は気象庁の予報用語によります。</p>
+  <ul class="links">
+    <li><a href="{JMA_ETRN}" rel="noopener">気象庁 過去の気象データ検索</a></li>
+    <li><a href="{JMA_YOUGO_KION}" rel="noopener">気象庁 予報用語（気温、湿度）</a></li>
+  </ul>
+
+  <h2>{e(page['heading'])}</h2>
+  {items_html(page['keywords'], items)}
+  <p class="note">{ITEMS_NOTE}</p>
+"""
+    return page_html(page, body)
+
+
 def render_top(obs_at, results, season, guides, daily_at, touyu):
     entries = []
     for m in METRICS:
@@ -2163,7 +2342,7 @@ def render_top(obs_at, results, season, guides, daily_at, touyu):
         <span class="d">{html.escape(p['lead'])}</span>
         <span class="d">公開 {iso_text(p['published'])}／データが増えると数字を自動で計算し直します</span>
       </a>
-    </li>""" for p in YOMIMONO)
+    </li>""" for p in reversed(YOMIMONO))
 
     return f"""<!DOCTYPE html>
 <html lang="ja">
@@ -2323,6 +2502,15 @@ def main():
     yasui_stats = touyu_month_stats(touyu)
     yasui_text = touyu_yasui_text(yasui_stats, touyu)
     proses[TOUYU_YASUI["id"]] = "".join(yasui_text.values())
+    # 読み物「寒い県ランキング」：月ごとの平年値が読めなければ、この読み物だけ書き換えずに知らせる
+    try:
+        s_rows = samui_rows(load_heinen_month())
+        s_text, s_win = samui_text(s_rows)
+        samui_probs = samui_problems(s_rows, s_win)
+    except (OSError, ValueError, KeyError) as err:
+        s_rows, s_text, s_win = [], {}, {}
+        samui_probs = [f"読み物「寒い県ランキング」：月ごとの平年値を読めない（{err}）"]
+    proses[SAMUI_KEN["id"]] = "".join(s_text.values())
 
     problems = run_checks({
         "now": now_jst, "age": age, "daily_at": daily_at, "by_pref": by_pref,
@@ -2351,6 +2539,8 @@ def main():
           f"東京都区部の推移 {max(touyu.get('tokyo', {'-': 0}))}まで / 商品{len(items[TOUYU['id']])}件")
     print(f"  読み物「{TOUYU_YASUI['h1']}」: 東京都区部 {len(yasui_stats['t_rows'])}年 / "
           f"47市 {yasui_stats['c_n']}組 / 商品{len(items[TOUYU_YASUI['id']])}件")
+    print(f"  読み物「{SAMUI_KEN['h1']}」: {len(s_rows)}地点 / 商品{len(items[SAMUI_KEN['id']])}件"
+          f"{' / ★' + ' / '.join(samui_probs) if samui_probs else ''}")
     if problems:
         print("--- 検査で問題を検出。公開しません ---")
         for p in problems:
@@ -2373,6 +2563,11 @@ def main():
         write(TOUYU_YASUI["out"], render_touyu_yasui(TOUYU_YASUI, touyu, yasui_stats,
                                                      items[TOUYU_YASUI["id"]], yasui_text))
         written.append(TOUYU_YASUI["out"])
+    if samui_probs:
+        warnings += samui_probs
+    else:
+        write(SAMUI_KEN["out"], render_samui(SAMUI_KEN, s_rows, items[SAMUI_KEN["id"]], s_text, s_win))
+        written.append(SAMUI_KEN["out"])
     write(OUT_TOP, render_top(obs_at, results, season, guides, daily_at,
                               (touyu, touyu_latest, touyu_rows)))
     write(OUT_SITEMAP, render_sitemap(obs_day.isoformat()))
