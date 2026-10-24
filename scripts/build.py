@@ -298,10 +298,15 @@ GUIDES = [
         "element_text": "朝の最低気温",
         "views": [
             {"months": (6, 7, 8, 9, 10, 11, 12), "label": "いつから（秋から冬）", "dir": "down",
-             "thresholds": [15.0, 10.0, 5.0], "main": 10.0, "order_from": (7, 1), "invert": False},
+             "thresholds": [15.0, 10.0, 5.0], "main": 10.0, "order_from": (7, 1), "invert": False,
+             "desc_use": "ストーブやこたつを出す時期を考える材料に"},
             {"months": (1, 2, 3, 4, 5), "label": "いつまで（冬から春）", "dir": "up",
-             "thresholds": [5.0, 10.0, 15.0], "main": 10.0, "order_from": (1, 1), "invert": True},
+             "thresholds": [5.0, 10.0, 15.0], "main": 10.0, "order_from": (1, 1), "invert": True,
+             "desc_use": "暖房をしまう時期を考える材料に"},
         ],
+        # 検索結果に出る説明文に、平年の日付を入れる都市（東京・大阪・札幌・福岡）。
+        # 「東京 暖房 いつから」などで探す読者に、開く前から答えが見えるようにする（2026-10-24 運営者承認）
+        "desc_cities": ["13", "27", "01", "40"],
         "note": "暖房（エアコン・ストーブ・こたつ）を使い始める時期や使い終える時期は、住まいのつくりや体感によって人それぞれです。"
                 "このページは、判断の材料として、決まった気温を下回る（春は上回る）時期を"
                 "平年値から機械的に求めて並べたものです。表の日付は平年の値で、その年の天候によって前後します。",
@@ -815,6 +820,27 @@ def guide_prose(guide, view, rows):
     return (f"気象庁の平年値（1991〜2020年の平均）をもとに、{guide['element_text']}が{temps}を"
             f"{verb}時期を、都道府県ごとに並べています。{guide_summary(guide, view, rows)}"
             f"{guide['note']}")
+
+
+def guide_desc(guide, view, rows):
+    """検索結果に出る説明文。desc_cities があれば、その都市の平年の日付を先頭に置く。"""
+    if not guide.get("desc_cities"):
+        return guide["desc"]
+    t = view["main"]
+    verb = "下回る" if view["dir"] == "down" else "上回る"
+    by_code = {r["code"]: r for r in rows}
+    parts = []
+    for code in guide["desc_cities"]:
+        r = by_code[code]
+        i = r["dates"][t]
+        if i is not None:
+            m, d = md_of(i)
+            parts.append(f"{r['spot']}{m}月{d}日")
+    if not parts:
+        return guide["desc"]
+    temps = "・".join(f"{x:g}℃" for x in view["thresholds"])
+    return (f"{guide['element_text']}が平年で{t:g}℃を{verb}のは、{'・'.join(parts)}ごろ（気象庁の平年値）。"
+            f"{view['desc_use']}、47都道府県の{temps}を{verb}日と、その日の{guide['element_label']}を毎日並べています。")
 
 
 # ---------- 灯油の値段 ----------
@@ -1654,6 +1680,8 @@ def run_checks(ctx):
         for word in BANNED:
             if word in ctx["proses"][page["id"]]:
                 problems.append(f"禁止表現が{name}の本文にある: {word}")
+            if word in ctx["descs"].get(page["id"], ""):
+                problems.append(f"禁止表現が{name}の説明文にある: {word}")
     return problems
 
 
@@ -1988,7 +2016,7 @@ def render_page(obs_at, metric, rows, items, prose, season, daily_at):
     return page_html(metric, body)
 
 
-def render_guide(guide, view, rows, items, prose, daily_at, heinen):
+def render_guide(guide, view, rows, items, prose, daily_at, heinen, desc=None):
     e = html.escape
     pm = guide_map_metric(guide, view)
     got = [r["val"] for r in rows if r["val"] is not None]
@@ -2053,7 +2081,7 @@ def render_guide(guide, view, rows, items, prose, daily_at, heinen):
   {items_html(guide['keywords'], items)}
   <p class="note">{ITEMS_NOTE}</p>
 """
-    return page_html(guide, body)
+    return page_html(dict(guide, desc=desc or guide["desc"]), body)
 
 
 TOUYU_MAP = {"name": "灯油18リットルの値段", "scale": ("heat",), "digits": 0, "unit": "円"}
@@ -2497,6 +2525,7 @@ def main():
     for g in GUIDES:
         view, rows = guides[g["id"]]
         proses[g["id"]] = guide_prose(g, view, rows)
+    descs = {g["id"]: guide_desc(g, *guides[g["id"]]) for g in GUIDES}
     proses[TOUYU["id"]] = touyu_prose(touyu, touyu_latest, touyu_rows)
     # 読み物：数字は毎回データから計算し、言い回しが成り立たなければ検査で止める
     yasui_stats = touyu_month_stats(touyu)
@@ -2515,7 +2544,7 @@ def main():
     problems = run_checks({
         "now": now_jst, "age": age, "daily_at": daily_at, "by_pref": by_pref,
         "obs": obs, "daily": daily, "results": results, "heinen": heinen,
-        "guides": {k: v[1] for k, v in guides.items()}, "items": items, "proses": proses,
+        "guides": {k: v[1] for k, v in guides.items()}, "items": items, "proses": proses, "descs": descs,
         "touyu": touyu,
     })
     # 読み物の言い回しが成り立たないときは、その読み物だけ書き換えずに知らせる（ほかのページは止めない）
@@ -2553,7 +2582,7 @@ def main():
     for g in GUIDES:
         view, rows = guides[g["id"]]
         write(g["out"], render_guide(g, view, rows, items[g["id"]], proses[g["id"]],
-                                     daily_at, heinen))
+                                     daily_at, heinen, descs[g["id"]]))
     write(TOUYU["out"], render_touyu(touyu, touyu_latest, touyu_rows, items[TOUYU["id"]],
                                      proses[TOUYU["id"]]))
     written = [p["out"] for p in METRICS + GUIDES + [TOUYU]]
