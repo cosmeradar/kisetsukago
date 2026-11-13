@@ -182,11 +182,13 @@ METRICS = [
         "path": "/kion/",
         "name": "気温",
         "h1": "都道府県別の気温",
-        "title": "都道府県別の気温ランキング（最高気温・最低気温・平年差）｜毎日更新",
+        # 2026-11-13 運営者承認：Bing で「都道府県 気温 比較表」「最高気温と最低気温の差 一覧表」「気温差 ランキング」で
+        # 読まれていたので、題名に「比較表」「気温差」を入れ、表に気温差の列を足した
+        "title": "都道府県別の気温ランキング・比較表（最高気温・最低気温・気温差・平年差）｜毎日更新",
         "unit": "℃",
         "digits": 1,
-        "desc": "気象庁の観測をもとに、47都道府県の代表地点のその日の最高気温・最低気温と平年差を、"
-                "地図と表で毎日まとめています。",
+        "desc": "気象庁の観測をもとに、47都道府県の代表地点のその日の最高気温・最低気温・気温差（最高と最低の差）と"
+                "平年差を、地図と比較表で毎日まとめています。",
         "pick": {"summer": "max", "winter": "min"},
         "order_label": {"summer": "最高気温の高い順", "winter": "最低気温の低い順"},
         "scale": ("heat",),
@@ -1860,6 +1862,25 @@ def hm_text(at):
     return f"{at.hour}時" if at.minute == 0 else f"{at.hour}時{at.minute:02d}分"
 
 
+def day_range(r):
+    """同じ地点の最高気温と最低気温の差（気温差）。どちらかが無ければ None。"""
+    if r.get("max") is None or r.get("min") is None:
+        return None
+    return round(r["max"] - r["min"], 1)
+
+
+def range_text(rows):
+    """代表地点の中で、気温差がいちばん大きい県と小さい県。言い回しは固定。"""
+    got = [(day_range(r), r) for r in rows if day_range(r) is not None]
+    if len(got) < 2:
+        return ""
+    big = max(got, key=lambda x: x[0])
+    small = min(got, key=lambda x: x[0])
+    return (f"最高気温と最低気温の差（気温差）は、代表地点の中では{big[1]['pref']}（{big[1]['spot']}）の"
+            f"{big[0]:.1f}℃がいちばん大きく、{small[1]['pref']}（{small[1]['spot']}）の{small[0]:.1f}℃が"
+            f"いちばん小さくなっています。")
+
+
 def prose_text(obs_at, metric, season, rows, daily_at):
     """毎日変わるのは日時と数字だけ。言い回しは固定。"""
     low, high = value_range(rows)
@@ -1873,7 +1894,7 @@ def prose_text(obs_at, metric, season, rows, daily_at):
         return (
             f"{day_text(daily_at)}（日本時間）の0時から{hm_text(daily_at)}までの気象庁の観測をもとに、"
             f"都道府県ごとの最高気温と最低気温を{by_season(metric['order_label'], season)}に並べています。"
-            f"{span}地図の色はこの幅にあわせて自動で割り振っています。{metric['tail']}"
+            f"{span}地図の色はこの幅にあわせて自動で割り振っています。{range_text(rows)}{metric['tail']}"
         )
     span = ""
     if any(r["val"] is not None for r in rows):
@@ -1975,7 +1996,7 @@ def render_page(obs_at, metric, rows, items, prose, season, daily_at):
         for r in rows:
             pid = PREF_CODE.get(r["pref"], "")
             if r["val"] is None:
-                cells = '<td>—</td><td>—</td><td class="s">データなし</td>'
+                cells = '<td>—</td><td>—</td><td>—</td><td class="s">データなし</td>'
             else:
                 mark = ""
                 if r["tag"]:
@@ -1989,19 +2010,21 @@ def render_page(obs_at, metric, rows, items, prose, season, daily_at):
                         return "<td>—</td>"
                     return (f'<td>{fmt(metric, v)}{unit}{extra}'
                             f'<span class="sub">平年差 {fmt_diff(diff)}</span></td>')
+                rng = day_range(r)
                 cells = (cell(r["max"], r["max_diff"], hi_mark) + cell(r["min"], r["min_diff"], lo_mark)
+                         + (f"<td>{rng:.1f}{unit}</td>" if rng is not None else "<td>—</td>")
                          + f'<td class="s">{e(r["spot"])}</td>')
             table_html.append(f'<tr id="p{pid}"><th scope="row">{e(r["pref"])}</th>{cells}</tr>')
         table = f"""  <table class="cols">
-    <thead><tr><th scope="col">都道府県</th><th scope="col">最高気温</th><th scope="col">最低気温</th><th scope="col">地点</th></tr></thead>
+    <thead><tr><th scope="col">都道府県</th><th scope="col">最高気温</th><th scope="col">最低気温</th><th scope="col">気温差</th><th scope="col">地点</th></tr></thead>
     <tbody>
       {"".join(table_html)}
     </tbody>
   </table>
-  <p class="note">気象庁の「最新の気象データ」をもとにしています。その日の0時から、上に記した時刻までの最高気温・最低気温です。平年差は、その地点のその日の平年値との差（気象庁の発表値）で、まだ発表されていないものは「—」としています。</p>"""
+  <p class="note">気象庁の「最新の気象データ」をもとにしています。その日の0時から、上に記した時刻までの最高気温・最低気温です。平年差は、その地点のその日の平年値との差（気象庁の発表値）で、まだ発表されていないものは「—」としています。気温差は、同じ地点の最高気温から最低気温を引いた値です。</p>"""
         stamp = (f"観測 {daily_at:%Y-%m-%d} 0時〜{hm_text(daily_at)} 日本時間／{order_label}／"
                  f"{fmt(metric, low)}〜{fmt(metric, high)}{unit}")
-        table_heading = "都道府県別 代表地点の最高気温・最低気温"
+        table_heading = "都道府県別 代表地点の最高気温・最低気温・気温差（比較表）"
     else:
         for r in rows:
             if r["val"] is None:
