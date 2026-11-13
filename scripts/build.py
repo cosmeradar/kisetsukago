@@ -299,7 +299,8 @@ GUIDES = [
         "views": [
             {"months": (6, 7, 8, 9, 10, 11, 12), "label": "いつから（秋から冬）", "dir": "down",
              "thresholds": [15.0, 10.0, 5.0], "main": 10.0, "order_from": (7, 1), "invert": False,
-             "desc_use": "ストーブやこたつを出す時期を考える材料に"},
+             "desc_use": "ストーブやこたつを出す時期を考える材料に",
+             "heading": "暖房を使い始める前に（楽天市場で選ばれているもの）"},
             {"months": (1, 2, 3, 4, 5), "label": "いつまで（冬から春）", "dir": "up",
              "thresholds": [5.0, 10.0, 15.0], "main": 10.0, "order_from": (1, 1), "invert": True,
              "desc_use": "暖房をしまう時期を考える材料に"},
@@ -311,7 +312,10 @@ GUIDES = [
                 "このページは、判断の材料として、決まった気温を下回る（春は上回る）時期を"
                 "平年値から機械的に求めて並べたものです。表の日付は平年の値で、その年の天候によって前後します。",
         "heading": "暖房の季節に選ばれているもの",
-        "keywords": ["セラミックヒーター", "こたつ", "湯たんぽ"],
+        # 商品は、目安の表のすぐ下に置く（2026-11-13 運営者承認。それまではページの最後で、28日で検索から112訪問・広告のクリック0）。
+        # 「ストーブ いつから」で来る読者がいるので、石油ファンヒーターを先頭に
+        "keywords": ["石油ファンヒーター", "セラミックヒーター", "こたつ"],
+        "items_lead": 'ストーブや石油ファンヒーターを使うなら、灯油の値段は<a href="/touyu/">灯油の値段のページ</a>で、県庁所在市ごとに見られます。',
     },
     {
         "id": "koromogae",
@@ -335,6 +339,9 @@ GUIDES = [
         ],
         # 説明文に平年の日付を入れる都市（東京・福岡・熊本・札幌＝「福岡 衣替え 時期」などで出ている都市。2026-10-24 運営者承認）
         "desc_cities": ["13", "40", "43", "01"],
+        # 本文の先頭に、都市名なしの「衣替え 時期」で探す読者への答え（都市ごとの平年の日付）を置く（2026-11-13 運営者承認。
+        # 11/11 までの28日でこの語は83.8位、都市名つきの語だけ上位だった）
+        "answer_label": "衣替えの時期の目安",
         "note": "衣替えをする時期は、学校や職場の決まりや体感によっても変わります。"
                 "このページは、判断の材料として、決まった気温を下回る（春は上回る）時期を"
                 "平年値から機械的に求めて並べたものです。表の日付は平年の値で、その年の天候によって前後します。",
@@ -818,10 +825,29 @@ def guide_summary(guide, view, rows):
     return text
 
 
+def guide_answer(guide, view, rows):
+    """answer_label があるページだけ、本文の先頭に都市ごとの平年の日付を答えとして置く（都市名なしで探す読者向け）。"""
+    if not guide.get("answer_label"):
+        return ""
+    t = view["main"]
+    verb = "下回る" if view["dir"] == "down" else "上回る"
+    by_code = {r["code"]: r for r in rows}
+    parts = []
+    for code in guide.get("desc_cities", []):
+        r = by_code[code]
+        if r["dates"][t] is not None:
+            parts.append(f"{r['spot']}は{md_text(r['dates'][t])}ごろ")
+    if not parts:
+        return ""
+    return (f"{guide['answer_label']}を「{guide['element_text']}が平年で{t:g}℃を{verb}ころ」とすると、"
+            f"{'、'.join(parts)}です（気象庁の平年値）。")
+
+
 def guide_prose(guide, view, rows):
     temps = "・".join(f"{t:g}℃" for t in view["thresholds"])
     verb = "下回る" if view["dir"] == "down" else "上回る"
-    return (f"気象庁の平年値（1991〜2020年の平均）をもとに、{guide['element_text']}が{temps}を"
+    return (f"{guide_answer(guide, view, rows)}"
+            f"気象庁の平年値（1991〜2020年の平均）をもとに、{guide['element_text']}が{temps}を"
             f"{verb}時期を、都道府県ごとに並べています。{guide_summary(guide, view, rows)}"
             f"{guide['note']}")
 
@@ -2046,6 +2072,8 @@ def render_guide(guide, view, rows, items, prose, daily_at, heinen, desc=None):
             f'<tr><th scope="row">{e(r["pref"])}<span class="sub">{e(r["spot"])}</span></th>'
             f"<td>{val}</td><td>{r['normal']:.1f}℃</td><td>{fmt_diff(r['diff'])}</td></tr>")
 
+    items_lead = f'<p class="note">{guide["items_lead"]}</p>' if guide.get("items_lead") else ""
+
     nevers = [r for r in rows if r["dates"][view["main"]] is None]
     never_note = ""
     if nevers:
@@ -2071,6 +2099,10 @@ def render_guide(guide, view, rows, items, prose, daily_at, heinen, desc=None):
   </table>
   <p class="note">各都道府県の県庁所在地の観測点（埼玉県は熊谷、滋賀県は彦根）の日別平年値から求めています。平年値は、気象庁が1991〜2020年の30年間の観測から求めた値です。「—」は、平年ではその気温を{verb}日がないことを表します。出典：気象庁「<a href="{e(heinen.get('source_url', 'https://www.data.jma.go.jp/stats/etrn/index.php'))}" rel="noopener">過去の気象データ検索</a>」。</p>
 
+  <h2>{e(view.get('heading', guide['heading']))}</h2>
+  {items_lead}{items_html(guide['keywords'], items)}
+  <p class="note">{ITEMS_NOTE}</p>
+
   <h2>{day_text(daily_at)}の{elem}と平年</h2>
   <table class="cols">
     <caption>{day_text(daily_at)} 0時から{hm_text(daily_at)}までの観測（日本時間）。平年は、その日の平年値です</caption>
@@ -2080,10 +2112,6 @@ def render_guide(guide, view, rows, items, prose, daily_at, heinen, desc=None):
     </tbody>
   </table>
   <p class="note">観測値は気象庁の「最新の気象データ」をもとにしています。平年差は気象庁の発表値で、まだ発表されていないときは同じ平年値から求めています。</p>
-
-  <h2>{e(guide['heading'])}</h2>
-  {items_html(guide['keywords'], items)}
-  <p class="note">{ITEMS_NOTE}</p>
 """
     return page_html(dict(guide, desc=desc or guide["desc"]), body)
 
