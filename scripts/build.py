@@ -64,6 +64,13 @@ HEINEN_FILE = "data/heinen.json"
 TOUYU_FILE = "data/touyu.json"
 # 灯油の新しい月がこの日数より長く入ってこなければ、自動実行を「失敗」にして知らせる（ページは前の値で作る）
 TOUYU_STALE_DAYS = 80
+DENKI_FILE = "data/denkidai.json"
+OROSHI_FILE = "data/oroshine.json"
+# 日本卸電力取引所（JEPX）のスポット市場の取引結果（年度ごとのCSV）。利用条件＝「出所を明示した上でご利用下さい」
+JEPX_DOWNLOAD = "https://www.jepx.jp/_download.php"
+JEPX_PAGE = "https://www.jepx.jp/electricpower/market-data/spot/"
+JEPX_STALE_DAYS = 4
+KOURI_HINMOKU = "https://www.stat.go.jp/data/kouri/doukou/2025np/pdf/hinmoku2025.pdf"
 WARN_FILE = "build_warnings.txt"
 MAX_AGE_MINUTES = 180
 # 日本時間でこれより前に動いたときは、その日の観測が短すぎるので書き換えない
@@ -412,7 +419,44 @@ SUMMER_MONTHS = (6, 7, 8)
 KOURI_HANASHI = "https://www.stat.go.jp/data/kouri/handbook/pdf/hanashi05_2026.pdf"
 TOYOTOMI_MANUAL = "https://www.toyotomi.jp/manual/operation/LC-32P.pdf"
 
-ALL_PAGES = METRICS + GUIDES + [TOUYU] + YOMIMONO
+# ---------- 電気代のページ ----------
+# 総務省「小売物価統計調査（動向編）」の品目3511 電気代。灯油と同じ表（主要品目の都市別小売価格）から毎月入れ替える。
+# 電気代は電力会社の料金で決まる品目なので、同じ電力会社の地域の市はほぼ同じ金額になる（2026-11-29 運営者承認
+# 「承諾不要のデータで作る」。電力会社のでんき予報などは利用条件が事前承諾のため使わない）。
+DENKIDAI = {
+    "id": "denkidai",
+    "out": "denkidai/index.html",
+    "path": "/denkidai/",
+    "name": "電気代",
+    "h1": "電気代（1か月・402kWhの場合）",
+    "title": "電気代の平均と推移（1か月・402kWh）｜47都道府県の県庁所在市別・総務省の毎月の調査",
+    "desc": "総務省の小売物価統計調査をもとに、47都道府県の県庁所在市の電気代（1か月に402kWhを使った場合）と、"
+            "1kWhあたりの金額、前の月・前の年からの値動き、灯油18リットルの値段を毎月まとめています。",
+    "heading": "電気を使う暮らしに選ばれているもの",
+    "keywords": ["電気毛布", "ワットチェッカー", "LED電球"],
+}
+
+# ---------- 電気の卸値のページ ----------
+# JEPX のスポット市場（前日に翌日の30分ごとの電気を取引する市場）のエリアプライス。毎日入れ替える。
+OROSHINE = {
+    "id": "oroshine",
+    "out": "oroshine/index.html",
+    "path": "/oroshine/",
+    "name": "電気の卸値",
+    "h1": "電気の卸値（エリア別・今日と明日）",
+    "title": "電気の卸値（JEPXスポット価格）エリア別・今日と明日｜その日の気温と並べて毎日更新",
+    "desc": "日本卸電力取引所（JEPX）のスポット市場で決まった、9つのエリアの電気の卸値（1kWhあたり）を、"
+            "今日と明日の30分ごとの値から平均・最高・最低にまとめ、各エリアの代表都市のその日の気温と並べています。",
+    "heading": "電気の使い方を見直すときに選ばれているもの",
+    "keywords": ["ワットチェッカー", "スマートプラグ", "ポータブル電源"],
+}
+# JEPX のエリア（沖縄は対象外）と、気温を並べる代表都市（各エリアの電力会社の本店がある都市の県庁所在地）
+JEPX_AREAS = [
+    ("北海道", "01"), ("東北", "04"), ("東京", "13"), ("中部", "23"), ("北陸", "16"),
+    ("関西", "27"), ("中国", "34"), ("四国", "37"), ("九州", "40"),
+]
+
+ALL_PAGES = METRICS + GUIDES + [TOUYU, DENKIDAI, OROSHINE] + YOMIMONO
 
 
 # ---------- 取得 ----------
@@ -489,7 +533,11 @@ def parse_daily_csv(text, kind):
         if len(r) < 16 or not r[0].strip():
             continue
         try:
-            at = datetime(int(r[4]), int(r[5]), int(r[6]), int(r[7]), int(r[8]), tzinfo=JST)
+            hour = int(r[7])
+            # 日付が変わった直後は、前の日の確定値が「24時00分」と書かれる。翌日の0時として読む
+            at = datetime(int(r[4]), int(r[5]), int(r[6]), hour % 24, int(r[8]), tzinfo=JST)
+            if hour == 24:
+                at += timedelta(days=1)
         except ValueError:
             continue
         times[at] = times.get(at, 0) + 1
@@ -967,27 +1015,52 @@ def find_touyu_files(year, month):
     return table, brand, released
 
 
-def touyu_prices(rows):
-    """都市別小売価格の表から、灯油（品目3701）の県庁所在市の値段を取り出す。{都道府県コード: 円}。"""
-    names = kero = None
+def item_prices(rows, item_code, item_name):
+    """都市別小売価格の表から、ある品目の県庁所在市の値段と単位を取り出す。({都道府県コード: 円}, 単位)。"""
+    names = item = None
     for r in rows:
         cells = [str(v).strip() if v is not None else "" for v in r]
         if names is None and ("札幌市" in cells or "札幌" in cells):
             names = cells
-        if kero is None and "灯油" in cells and any(c in ("3701", "3701.0") for c in cells):
-            kero = r
-    if names is None or kero is None:
-        raise ValueError("都市名の行か灯油の行が見つかりません")
+        if item is None and item_name in cells and any(c in (item_code, item_code + ".0") for c in cells):
+            item = r
+    if names is None or item is None:
+        raise ValueError(f"都市名の行か{item_name}の行が見つかりません")
+    cells = [str(v).strip() if v is not None else "" for v in item]
+    j = cells.index(item_name)
+    unit = cells[j + 1] if j + 1 < len(cells) else ""
     prices = {}
     for code, (city, alias) in CAPITALS.items():
         for cand in (city,) + alias:
             if cand in names:
-                j = names.index(cand)
-                v = kero[j] if j < len(kero) else None
+                k = names.index(cand)
+                v = item[k] if k < len(item) else None
                 if isinstance(v, (int, float)):
                     prices[code] = int(round(v))
                 break
-    return prices
+    return prices, unit
+
+
+def touyu_prices(rows):
+    """都市別小売価格の表から、灯油（品目3701）の県庁所在市の値段を取り出す。{都道府県コード: 円}。"""
+    return item_prices(rows, "3701", "灯油")[0]
+
+
+def denki_prices(rows):
+    """電気代（品目3511）の県庁所在市の値段と、使用量（kWh）。使用量は単位の欄（例「1か月･402kWh」）から読む。"""
+    prices, unit = item_prices(rows, "3511", "電気代")
+    m = re.search(r"(\d+)\s*kWh", unit)
+    if not m:  # 古い年の表は単位が「1か月」だけで、使用量は表の下の注記（「1か月441kWh使用したときの料金」）にある
+        for r in rows:
+            for v in r:
+                s = str(v) if v is not None else ""
+                if "電気代" in s and "kWh" in s:
+                    m = re.search(r"(\d+)\s*kWh", s)
+                    if m:
+                        break
+            if m:
+                break
+    return prices, (int(m.group(1)) if m else None)  # 2020年12月〜2022年ごろの表には使用量の記載が無い
 
 
 def local_brand_capitals(data):
@@ -1104,6 +1177,273 @@ def update_touyu(data, today):
     return changed, notes
 
 
+def update_denkidai(data, today):
+    """電気代の新しく公表された月を足す。表は灯油と同じなので、取り方も同じ。返すのは (書き換えたか, 気になったことの一覧)。"""
+    notes = []
+    changed = False
+    months = data.setdefault("months", {})
+    key = max(months) if months else "2019-12"
+    for _ in range(3):
+        key = month_shift(key, 1)
+        y, m = map(int, key.split("-"))
+        if (y, m) >= (today.year, today.month):
+            break
+        try:
+            table, _, released = find_touyu_files(y, m)
+        except Exception as err:
+            notes.append(f"e-Stat の一覧を読めませんでした（{month_text(key)}分）: {err}")
+            break
+        if not table:
+            break
+        try:
+            prices, kwh = denki_prices(first_sheet_rows(get_bytes(ESTAT_FILE.format(sid=table, kind=0))))
+        except Exception as err:
+            notes.append(f"{month_text(key)}分の表を読めませんでした: {err}")
+            break
+        odd = [c for c, v in prices.items() if not 3000 <= v <= 40000]
+        if len(prices) < 40 or odd or not kwh:
+            notes.append(f"{month_text(key)}分の電気代がそろいません（{len(prices)}市・範囲外 {odd}・使用量 {kwh}）")
+            break
+        months[key] = prices
+        data.setdefault("kwh", {})[key] = kwh
+        data.setdefault("released", {})[key] = released
+        data.setdefault("statinf", {})[key] = table
+        changed = True
+        print(f"  電気代: {month_text(key)}分を足しました（{len(prices)}市・{kwh}kWh）")
+        time.sleep(2)
+    return changed, notes
+
+
+def summarize_denkidai(data, touyu):
+    """いちばん新しい月の、県庁所在市ごとの電気代・1kWhあたり・前月差・前年同月差と、同じ月の灯油。安い順。
+
+    前月差・前年同月差は、使用量（kWh）が同じ月どうしのときだけ出す（基本銘柄が改正された月をまたぐと比べられない）。
+    """
+    months = data["months"]
+    kwh = data.get("kwh", {})
+    latest = max(months)
+    now_kwh = kwh.get(latest)
+    def same(key):
+        return months.get(key, {}) if kwh.get(key) == now_kwh else {}
+    cur, prev, last_year = months[latest], same(month_shift(latest, -1)), same(month_shift(latest, -12))
+    kero = touyu.get("months", {}).get(latest, {})
+    rows = []
+    for code, pref in PREF.items():
+        v = cur.get(code)
+        rows.append({
+            "pref": pref, "code": code, "city": CAPITALS[code][0], "val": v,
+            "label": f"{v:,}" if v is not None else "—",
+            "per_kwh": round(v / now_kwh, 1) if v is not None and now_kwh else None,
+            "mom": v - prev[code] if v is not None and code in prev else None,
+            "yoy": v - last_year[code] if v is not None and code in last_year else None,
+            "kero": kero.get(code),
+        })
+    rows.sort(key=lambda r: (r["val"] is None, r["val"] or 0, r["code"]))
+    return latest, rows
+
+
+def denki_groups(rows):
+    """同じ金額の市をまとめる（電気代は電力会社の料金で決まるので、同じ地域の市は同じ金額になる）。安い順。"""
+    groups = {}
+    for r in rows:
+        if r["val"] is not None:
+            groups.setdefault(r["val"], []).append(r)
+    return [(v, groups[v]) for v in sorted(groups)]
+
+
+def denki_prose(data, latest, rows, touyu):
+    """電気代の本文。言い回しは固定で、毎月変わるのは月と数字だけ。"""
+    got = [r for r in rows if r["val"] is not None]
+    low, high = got[0], got[-1]
+    kwh = data.get("kwh", {}).get(latest)
+    groups = denki_groups(rows)
+    text = (f"総務省統計局の小売物価統計調査をもとに、47都道府県の県庁所在市の電気代を安い順に並べています。"
+            f"金額は、1か月に{kwh}kWhの電気を使った場合の料金です。"
+            f"{month_text(latest)}分は、最も安い{low['city']}（{low['pref']}）などで{low['val']:,}円、"
+            f"最も高い{high['city']}（{high['pref']}）などで{high['val']:,}円でした。"
+            f"1kWhあたりに直すと{low['per_kwh']:.1f}円から{high['per_kwh']:.1f}円です（当サイトの計算）。"
+            f"電気代は電力会社の料金で決まるため、同じ地域の市は同じ金額になり、47市の金額は{len(groups)}通りでした。")
+    avg = average(r["val"] for r in rows)
+    old_key = month_shift(latest, -12)
+    last = data["months"].get(old_key)
+    if avg is not None and last and data.get("kwh", {}).get(old_key) == kwh:
+        old = average(last.get(code) for code in PREF)
+        if old:
+            diff = avg - old
+            how = "高く" if diff > 0 else "安く" if diff < 0 else "同じ金額に"
+            amount = f"{abs(diff):,}円" if diff else ""
+            text += (f"47市の平均は{avg:,}円で、1年前の同じ月（{old:,}円）より{amount}{how}なっています"
+                     f"（平均は当サイトの計算）。")
+    elif avg is not None:
+        text += f"47市の平均は{avg:,}円です（当サイトの計算）。"
+    tokyo = next(r for r in rows if r["code"] == "13")
+    if tokyo["val"] is not None:
+        text += f"東京都区部は{tokyo['val']:,}円です。"
+    nxt = touyu.get("next_release")
+    if nxt:
+        text += f"値段は毎月1回の調査で、次の{month_text(nxt['month'])}分は{iso_text(nxt['date'])}に公表される予定です。"
+    return text
+
+
+def denki_stale_days(data, today):
+    key = max(data["months"])
+    end = date.fromisoformat(month_shift(key, 1) + "-01") - timedelta(days=1)
+    return (today - end).days
+
+
+# ---------- 電気の卸値（JEPX） ----------
+
+def fiscal_year(d):
+    return d.year if d.month >= 4 else d.year - 1
+
+
+def fetch_jepx_year(fy):
+    """JEPX のスポット市場の取引結果（年度ごとのCSV）を取る。"""
+    body = urllib.parse.urlencode({"dir": "spot_summary", "file": f"spot_summary_{fy}.csv"}).encode()
+    req = urllib.request.Request(JEPX_DOWNLOAD, data=body, headers={
+        "User-Agent": "kisetsukago/1.0 (+https://kisetsukago.com/)", "Referer": JEPX_PAGE})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return r.read().decode("cp932")
+
+
+def parse_jepx(text):
+    """{"YYYY-MM-DD": {"system": [48], "北海道": [48], ...}} にする。48コマそろった日だけ。"""
+    rows = list(csv.reader(io.StringIO(text)))
+    head = [h.strip() for h in rows[0]]
+    want = {"system": "システムプライス(円/kWh)"}
+    want.update({a: f"エリアプライス{a}(円/kWh)" for a, _ in JEPX_AREAS})
+    idx = {}
+    for k, name in want.items():
+        if name not in head:
+            raise ValueError(f"JEPX のCSVに「{name}」の列がありません: {head[:8]}")
+        idx[k] = head.index(name)
+    days = {}
+    for r in rows[1:]:
+        if len(r) < len(head) or not r[0].strip():
+            continue
+        try:
+            d = datetime.strptime(r[0].strip(), "%Y/%m/%d").date().isoformat()
+            slot = int(r[1])
+        except ValueError:
+            continue
+        rec = days.setdefault(d, {k: [None] * 48 for k in want})
+        if 1 <= slot <= 48:
+            for k, i in idx.items():
+                rec[k][slot - 1] = to_float(r[i])
+    return {d: v for d, v in days.items() if all(x is not None for s in v.values() for x in s)}
+
+
+def day_summary(slots):
+    """48コマ（30分ごと）の値から、平均・最高・最低と、そのコマを返す。"""
+    hi = max(range(48), key=lambda i: slots[i])
+    lo = min(range(48), key=lambda i: slots[i])
+    return {"avg": round(sum(slots) / 48, 2), "max": slots[hi], "max_slot": hi + 1,
+            "min": slots[lo], "min_slot": lo + 1}
+
+
+def slot_text(slot):
+    """コマの番号（1〜48）を「8:00〜8:30」の形にする。"""
+    s = (slot - 1) * 30
+    e = s + 30
+    return f"{s // 60}:{s % 60:02d}〜{e // 60}:{e % 60:02d}"
+
+
+def update_oroshine(data, today, daily, heinen, daily_at):
+    """JEPX の値を取りに行き、日ごとのまとめを足す。今日の代表都市の気温も貯めておく（気温との関係を後で見るため）。
+
+    取れなくてもページは前の値で作る（ここで止めない）。返すのは (書き換えたか, 気になったことの一覧)。
+    """
+    notes = []
+    changed = False
+    days = data.setdefault("days", {})
+    fys = [fiscal_year(today)]
+    if today.month == 4 and today.day <= 8:  # 年度が変わってすぐは、1週間前が前の年度のファイルにある
+        fys.insert(0, fys[0] - 1)
+    for fy in fys:
+        try:
+            parsed = parse_jepx(fetch_jepx_year(fy))
+        except Exception as err:
+            notes.append(f"JEPX の{fy}年度の値を読めませんでした: {err}")
+            continue
+        for d, rec in parsed.items():
+            summ = {k: day_summary(v) for k, v in rec.items()}
+            if days.get(d, {}).get("price") != summ:
+                days.setdefault(d, {})["price"] = summ
+                changed = True
+        time.sleep(2)
+    # 今日の代表都市の最高・最低気温（その日の0時から観測した時刻まで）
+    temps = {}
+    for area, code in JEPX_AREAS:
+        st = heinen["stations"][code]
+        obs = daily.get(st["amedas"], {})
+        temps[area] = {"max": obs.get("max"), "min": obs.get("min")}
+    rec = days.setdefault(today.isoformat(), {})
+    new = {"at": daily_at.strftime("%Y-%m-%d %H:%M"), "temps": temps}
+    if rec.get("kion") != new:
+        rec["kion"] = new
+        changed = True
+    return changed, notes
+
+
+def summarize_oroshine(data, today):
+    """今日と明日のエリアごとのまとめ。明日の値がまだ無いときは None。"""
+    days = data.get("days", {})
+    t, tm, wk = today.isoformat(), (today + timedelta(days=1)).isoformat(), (today - timedelta(days=7)).isoformat()
+    priced = sorted(d for d, v in days.items() if "price" in v)
+    if not priced:
+        return None
+    base = t if t in priced else priced[-1] if priced[-1] < t else None
+    if base is None:
+        return None
+    nxt = tm if tm in priced and base == t else None
+    week = (date.fromisoformat(base) - timedelta(days=7)).isoformat()
+    kion = days.get(base, {}).get("kion", {})
+    rows = []
+    for area, code in [("system", None)] + JEPX_AREAS:
+        p = days[base]["price"][area]
+        n = days[nxt]["price"][area] if nxt else None
+        w = days.get(week, {}).get("price", {}).get(area)
+        temp = kion.get("temps", {}).get(area, {}) if code else {}
+        rows.append({
+            "area": area, "code": code,
+            "city": CAPITALS[code][0] if code else None,
+            "today": p, "tomorrow": n,
+            "week_diff": round(p["avg"] - w["avg"], 2) if w else None,
+            "tmax": temp.get("max"), "tmin": temp.get("min"),
+        })
+    return {"base": base, "next": nxt, "week": week, "kion_at": kion.get("at"), "rows": rows}
+
+
+def oroshine_prose(summ):
+    """卸値の本文。言い回しは固定。"""
+    b = date.fromisoformat(summ["base"])
+    rows = [r for r in summ["rows"] if r["code"]]
+    sys_row = summ["rows"][0]
+    lo = min(rows, key=lambda r: r["today"]["avg"])
+    hi = max(rows, key=lambda r: r["today"]["avg"])
+    text = (f"日本卸電力取引所（JEPX）のスポット市場で決まった電気の卸値を、9つのエリアごとにまとめています。"
+            f"{b.month}月{b.day}日の1日の平均は、全国の基準になるシステムプライスが1kWhあたり{sys_row['today']['avg']:.2f}円、"
+            f"エリア別では{lo['area']}エリアが最も安く{lo['today']['avg']:.2f}円、"
+            f"{hi['area']}エリアが最も高く{hi['today']['avg']:.2f}円でした。")
+    if sys_row["week_diff"] is not None:
+        d = sys_row["week_diff"]
+        how = "高く" if d > 0 else "安く" if d < 0 else "同じに"
+        amount = f"{abs(d):.2f}円" if d else ""
+        text += f"システムプライスは1週間前の同じ曜日より{amount}{how}なっています。"
+    if summ["next"]:
+        n = date.fromisoformat(summ["next"])
+        text += f"翌日{n.month}月{n.day}日分のシステムプライスの平均は{sys_row['tomorrow']['avg']:.2f}円です。"
+    text += ("卸値は電力会社などが電気を仕入れる市場の値段で、家庭向けの電気料金とは別のものです。"
+             "日々の卸値がそのまま家庭の料金になるわけではありません。")
+    return text
+
+
+def oroshi_stale_days(summ, today):
+    if not summ:
+        return 999
+    return (today - date.fromisoformat(summ["base"])).days
+
+
 def touyu_stale_days(data, today):
     """いちばん新しい月の末日から何日たったか。"""
     key = max(data["months"])
@@ -1168,6 +1508,40 @@ def tokyo_yearly(tokyo):
     for key, v in tokyo.items():
         years.setdefault(int(key[:4]), []).append(v)
     return [(y, round(sum(v) / len(v))) for y, v in sorted(years.items()) if len(v) == 12]
+
+
+def line_chart_svg(vals, ticks, step, digits, title, breaks=()):
+    """汎用の折れ線。vals は値の並び（None は線を切る）、ticks は {位置: 文字}、breaks は縦の区切り線を引く位置。"""
+    got = [v for v in vals if v is not None]
+    w, h, left, right, top, bottom = 640, 240, 52, 12, 14, 30
+    lo = int(min(got) // step * step)
+    hi = int(-(-max(got) // step) * step)
+    if hi == lo:
+        hi = lo + step
+    def x(i):
+        return left + (w - left - right) * i / max(1, len(vals) - 1)
+    def y(v):
+        return top + (h - top - bottom) * (hi - v) / max(1e-9, hi - lo)
+    parts = []
+    v = lo
+    while v <= hi + 1e-9:
+        parts.append(f'<line x1="{left}" y1="{y(v):.1f}" x2="{w - right}" y2="{y(v):.1f}" class="grid"/>'
+                     f'<text x="{left - 6}" y="{y(v) + 4:.1f}" class="ax" text-anchor="end">{v:,.{digits}f}</text>')
+        v += step
+    for i, label in ticks.items():
+        parts.append(f'<text x="{x(i):.1f}" y="{h - 10}" class="ax" text-anchor="middle">{html.escape(label)}</text>')
+    for i in breaks:
+        parts.append(f'<line x1="{x(i):.1f}" y1="{top}" x2="{x(i):.1f}" y2="{h - bottom}" class="grid" stroke-dasharray="4 3"/>')
+    seg = []
+    for i, v in enumerate(vals + [None]):
+        if v is None:
+            if len(seg) > 1:
+                parts.append(f'<polyline points="{" ".join(seg)}" class="line"/>')
+            seg = []
+        else:
+            seg.append(f"{x(i):.1f},{y(v):.1f}")
+    return (f'<svg class="chart" viewBox="0 0 {w} {h}" role="img" aria-label="{html.escape(title)}">'
+            f"<title>{html.escape(title)}</title>{''.join(parts)}</svg>")
 
 
 def tokyo_chart_svg(tokyo):
@@ -1704,6 +2078,28 @@ def run_checks(ctx):
         if odd:
             problems.append(f"灯油の値段が異常値: {odd}")
 
+    denki = ctx["denki"]
+    if not denki.get("months"):
+        problems.append("電気代のデータが無い")
+    else:
+        latest = max(denki["months"])
+        cur = denki["months"][latest]
+        if len(cur) < 40:
+            problems.append(f"電気代がそろわない（{month_text(latest)}分・{len(cur)}市）")
+        odd = [f"{CAPITALS[c][0]} {v}" for c, v in cur.items() if not 3000 <= v <= 40000]
+        if odd:
+            problems.append(f"電気代が異常値: {odd}")
+        if not denki.get("kwh", {}).get(latest):
+            problems.append(f"電気代の使用量（kWh）が無い（{month_text(latest)}分）")
+
+    # 卸値は取れなくても他のページを止めない（ここでは値の範囲だけを見る。取れない日が続けば warnings で知らせる）
+    summ = ctx.get("oroshi")
+    if summ:
+        for r in summ["rows"]:
+            for p in (r["today"], r["tomorrow"]):
+                if p and not (-1.0 <= p["min"] <= p["max"] <= 500.0):
+                    problems.append(f"電気の卸値が異常値: {r['area']} {p['min']}〜{p['max']}")
+
     for page in ALL_PAGES:
         name = page["name"]
         group = ctx["items"][page["id"]]
@@ -1754,6 +2150,9 @@ CSS_COMMON = """
   footer{margin-top:3rem;padding-top:1.25rem;border-top:1px solid var(--rule);
          font-size:.8125rem;color:var(--ink-soft)}
   .mapwrap{overflow-x:auto;margin:0 0 .85rem;padding-bottom:.2rem}
+  .tablewrap{overflow-x:auto;margin:0 0 1rem}
+  .tablewrap table.cols{margin-bottom:.4rem}
+  .tablewrap table.cols th[scope=row]{white-space:nowrap}
   svg.jmap{display:block;width:100%;height:auto}
   svg.jmap:not(.mini){min-width:30rem}
   svg.jmap text{text-anchor:middle;font-family:var(--gothic);fill:var(--ink)}
@@ -2237,6 +2636,217 @@ def render_touyu(data, latest, rows, items, prose):
     return page_html(TOUYU, body)
 
 
+DENKI_MAP = {"name": "電気代（1か月）", "scale": ("heat",), "digits": 0, "unit": "円"}
+
+
+def denki_stamp(data, touyu, latest):
+    released = data.get("released", {}).get(latest)
+    text = f"総務省 小売物価統計調査（動向編）／{month_text(latest)}分"
+    if released:
+        text += f"（{iso_text(released)}公表）"
+    nxt = touyu.get("next_release")
+    if nxt:
+        text += f"／次は{month_text(nxt['month'])}分を{iso_text(nxt['date'])}に公表予定"
+    return text
+
+
+def denki_chart(data):
+    """東京都区部の1kWhあたりの電気代の推移（使用量の決まりが変わった月に区切り線）。"""
+    keys = sorted(data["months"])
+    kwh = data.get("kwh", {})
+    vals = [round(data["months"][k]["13"] / kwh[k], 2) if "13" in data["months"][k] and kwh.get(k) else None
+            for k in keys]
+    ticks = {i: k[:4] for i, k in enumerate(keys) if k.endswith("-01")}
+    breaks = [i for i in range(1, len(keys)) if kwh.get(keys[i]) != kwh.get(keys[i - 1])]
+    got = [v for v in vals if v is not None]
+    title = (f"東京都区部の電気代を1kWhあたりに直した推移（{month_text(keys[0])}〜{month_text(keys[-1])}）。"
+             f"最も安い月は{min(got):.1f}円、最も高い月は{max(got):.1f}円")
+    return line_chart_svg(vals, ticks, 5, 0, title, breaks), keys, vals
+
+
+def render_denkidai(data, latest, rows, items, prose, touyu):
+    e = html.escape
+    got = [r["val"] for r in rows if r["val"] is not None]
+    low, high = (min(got), max(got)) if got else (0, 0)
+    kwh = data.get("kwh", {}).get(latest)
+    prev, last_year = month_shift(latest, -1), month_shift(latest, -12)
+
+    def kero(v):
+        return f"{v:,}円" if v is not None else "—"
+    table_rows = "".join(
+        f'<tr id="p{r["code"]}"><th scope="row">{e(r["pref"])}<span class="sub">{e(r["city"])}</span></th>'
+        f"<td>{(str(format(r['val'], ',')) + '円') if r['val'] is not None else '—'}</td>"
+        f"<td>{(format(r['per_kwh'], '.1f') + '円') if r['per_kwh'] is not None else '—'}</td>"
+        f"<td>{signed_yen(r['mom'])}</td><td>{signed_yen(r['yoy'])}</td><td>{kero(r['kero'])}</td></tr>"
+        for r in rows)
+
+    group_rows = "".join(
+        f'<tr><th scope="row">{v:,}円</th><td>{e("・".join(r["city"] for r in rs))}</td></tr>'
+        for v, rs in denki_groups(rows))
+
+    chart, keys, vals = denki_chart(data)
+    kwh_map = data.get("kwh", {})
+    changes = [k for i, k in enumerate(keys[1:], 1) if kwh_map.get(k) != kwh_map.get(keys[i - 1])]
+    change_note = "".join(
+        f"{month_text(k)}分から、もとになる使用量が1か月{kwh_map.get(month_shift(k, -1))}kWhから"
+        f"{kwh_map.get(k)}kWhに変わりました（総務省が基本銘柄を改正）。"
+        for k in changes)
+    t_latest = vals[-1]
+    yearly = {}
+    for k, v in zip(keys, vals):
+        if v is not None:
+            yearly.setdefault(int(k[:4]), []).append(v)
+    year_rows = "".join(f'<tr><th scope="row">{y}年</th><td>{sum(v) / len(v):.1f}円</td></tr>'
+                        for y, v in sorted(yearly.items()) if len(v) == 12)
+
+    body = f"""  <p class="stamp">{e(denki_stamp(data, touyu, latest))}</p>
+
+  <p class="lede">{e(prose)}</p>
+
+  <h2>全国の分布（{month_text(latest)}分・1か月{kwh}kWhの場合）</h2>
+  <div class="mapwrap">{japan_map_svg(rows, DENKI_MAP, low, high)}</div>
+  <p class="mapkey"><span>{low:,}円</span>{legend_svg(DENKI_MAP, low, high)}<span>{high:,}円</span></p>
+  <p class="note">都道府県をおおよその位置に並べたもので、実際の面積や形とは異なります。マス目の数字は、その都道府県の県庁所在市の電気代（円）です。マス目を押すと<a href="#hyou">下の表</a>の該当する行に移動します。</p>
+
+  <h2 id="hyou">都道府県別 県庁所在市の電気代</h2>
+  <div class="tablewrap">
+  <table class="cols">
+    <caption>{month_text(latest)}分・1か月{kwh}kWhの場合の電気代（安い順）。1kWhあたりは電気代÷{kwh}（当サイトの計算）。前月差・前年同月差は、同じ市の{month_text(prev)}分・{month_text(last_year)}分との差です（使用量の決まりが違う月とは比べていません）。灯油は同じ月の18リットルの店頭価格です</caption>
+    <thead><tr><th scope="col">都道府県</th><th scope="col">1か月</th><th scope="col">1kWhあたり</th><th scope="col">前月差</th><th scope="col">前年同月差</th><th scope="col">灯油18L</th></tr></thead>
+    <tbody>
+      {table_rows}
+    </tbody>
+  </table>
+  </div>
+  <p class="note">電気代は、総務省統計局の小売物価統計調査の品目「電気代」で、「従量電灯，アンペア制（契約電流50アンペア）又は最低料金制」の料金を、1か月{kwh}kWh使ったとして計算した金額です（<a href="{KOURI_HINMOKU}" rel="noopener">調査品目及び基本銘柄</a>）。それぞれの地域の電力会社の料金で計算されるため、実際の家庭の電気代は、契約や使った量によって変わります。出典：総務省統計局「小売物価統計調査（動向編）」主要品目の都市別小売価格（<a href="https://www.e-stat.go.jp/" rel="noopener">政府統計の総合窓口 e-Stat</a>）を加工して作成。</p>
+
+  <h2>同じ金額の市（{month_text(latest)}分）</h2>
+  <table class="cols">
+    <caption>電気代が同じ金額の県庁所在市をまとめたもの（安い順）</caption>
+    <thead><tr><th scope="col">1か月</th><th scope="col">県庁所在市</th></tr></thead>
+    <tbody>
+      {group_rows}
+    </tbody>
+  </table>
+
+  <h2>東京都区部の推移（1kWhあたり・{month_text(keys[0])}〜{month_text(keys[-1])}）</h2>
+  <div class="mapwrap">{chart}</div>
+  <p class="note">東京都区部の電気代を、そのときの使用量（kWh）で割って1kWhあたりにした値です（当サイトの計算）。{month_text(keys[-1])}分は{t_latest:.1f}円でした。{e(change_note)}点線はその区切りです。</p>
+  <table class="cols">
+    <caption>東京都区部の年平均（1kWhあたり・12か月の平均・当サイトの計算）</caption>
+    <thead><tr><th scope="col">年</th><th scope="col">1kWhあたり</th></tr></thead>
+    <tbody>
+      {year_rows}
+    </tbody>
+  </table>
+
+  <h2>関連するページ</h2>
+  <ul class="links">
+    <li><a href="{TOUYU['path']}">{e(TOUYU['h1'])}</a>（同じ調査の県庁所在市別の灯油の値段）</li>
+    <li><a href="{OROSHINE['path']}">{e(OROSHINE['h1'])}</a>（電力会社などが電気を仕入れる市場の値段・毎日）</li>
+  </ul>
+
+  <h2>{e(DENKIDAI['heading'])}</h2>
+  {items_html(DENKIDAI['keywords'], items)}
+  <p class="note">{ITEMS_NOTE}</p>
+"""
+    return page_html(DENKIDAI, body)
+
+
+def fmt_c(v):
+    return "—" if v is None else f"{v:.1f}℃"
+
+
+def render_oroshine(data, summ, items, prose):
+    e = html.escape
+    b = date.fromisoformat(summ["base"])
+    head_t = f"{b.month}月{b.day}日"
+    has_next = summ["next"] is not None
+    if has_next:
+        n = date.fromisoformat(summ["next"])
+        head_n = f"{n.month}月{n.day}日"
+
+    def area_name(r):
+        return "システムプライス（全国）" if r["code"] is None else f"{r['area']}エリア"
+    rows_html = []
+    for r in summ["rows"]:
+        p = r["today"]
+        city = f'<span class="sub">{e(r["city"])}</span>' if r["city"] else ""
+        wd = "—" if r["week_diff"] is None else f"{r['week_diff']:+.2f}円"
+        rows_html.append(
+            f'<tr><th scope="row">{e(area_name(r))}{city}</th>'
+            f"<td>{p['avg']:.2f}円</td>"
+            f"<td>{p['max']:.2f}円<span class=\"sub\">{slot_text(p['max_slot'])}</span></td>"
+            f"<td>{p['min']:.2f}円<span class=\"sub\">{slot_text(p['min_slot'])}</span></td>"
+            f"<td>{wd}</td>"
+            + (f"<td>{fmt_c(r['tmax'])} / {fmt_c(r['tmin'])}</td>" if r["code"] else "<td>—</td>")
+            + "</tr>")
+    next_html = ""
+    if has_next:
+        nrows = "".join(
+            f'<tr><th scope="row">{e(area_name(r))}</th><td>{r["tomorrow"]["avg"]:.2f}円</td>'
+            f"<td>{r['tomorrow']['max']:.2f}円<span class=\"sub\">{slot_text(r['tomorrow']['max_slot'])}</span></td>"
+            f"<td>{r['tomorrow']['min']:.2f}円<span class=\"sub\">{slot_text(r['tomorrow']['min_slot'])}</span></td>"
+            f"<td>{r['tomorrow']['avg'] - r['today']['avg']:+.2f}円</td></tr>"
+            for r in summ["rows"])
+        next_html = f"""
+  <h2>明日（{head_n}）の卸値</h2>
+  <div class="tablewrap">
+  <table class="cols">
+    <caption>{head_n}に受け渡す電気の、30分ごとの値段の平均・最高・最低（1kWhあたり）。前日差は{head_t}の平均との差です</caption>
+    <thead><tr><th scope="col">エリア</th><th scope="col">平均</th><th scope="col">最高</th><th scope="col">最低</th><th scope="col">前日差</th></tr></thead>
+    <tbody>
+      {nrows}
+    </tbody>
+  </table>
+  </div>
+"""
+    # システムプライスの1日の平均の推移（直近120日）
+    days = data.get("days", {})
+    keys = sorted(d for d, v in days.items() if "price" in v and d <= summ["base"])[-120:]
+    vals = [days[k]["price"]["system"]["avg"] for k in keys]
+    ticks = {i: f"{int(k[5:7])}月" for i, k in enumerate(keys) if k.endswith("-01")}
+    title = (f"システムプライスの1日の平均の推移（{iso_text(keys[0])}〜{iso_text(keys[-1])}）。"
+             f"最も安い日は{min(vals):.2f}円、最も高い日は{max(vals):.2f}円")
+    chart = line_chart_svg(vals, ticks, 5, 0, title)
+    kion_at = summ.get("kion_at") or ""
+
+    body = f"""  <p class="stamp">日本卸電力取引所（JEPX）スポット市場／{head_t}分{('・' + head_n + '分') if has_next else ''}／気温は気象庁の観測（{e(kion_at)}まで）</p>
+
+  <p class="lede">{e(prose)}</p>
+
+  <h2>今日（{head_t}）の卸値とその日の気温</h2>
+  <div class="tablewrap">
+  <table class="cols">
+    <caption>{head_t}に受け渡す電気の、30分ごとの値段の平均・最高・最低（1kWhあたり・最高と最低は時間帯つき）。1週間前との差は、同じ曜日の平均との差です。気温は各エリアの代表都市の{head_t}の最高・最低気温（0時から観測した時刻まで）</caption>
+    <thead><tr><th scope="col">エリア</th><th scope="col">平均</th><th scope="col">最高</th><th scope="col">最低</th><th scope="col">1週間前との差</th><th scope="col">最高／最低気温</th></tr></thead>
+    <tbody>
+      {"".join(rows_html)}
+    </tbody>
+  </table>
+  </div>
+  <p class="note">代表都市は、各エリアの電力会社の本店がある都市の県庁所在地（気象台）です。エリアの範囲は都道府県の境と一致しないところがあります（例：東北エリアには新潟県が入ります）。沖縄はスポット市場の対象外です。</p>
+{next_html}
+  <h2>システムプライスの推移（1日の平均・直近{len(keys)}日）</h2>
+  <div class="mapwrap">{chart}</div>
+  <p class="note">システムプライスは、エリアの区切りを考えずに全国で取引した場合の値段です。値段は30分ごとに決まり、ここではその日の48コマの単純な平均にしています（当サイトの計算）。</p>
+
+  <h2>この値段について</h2>
+  <p class="note">スポット市場は、電力会社などが翌日の30分ごとの電気を売り買いする市場で、前日の午前に翌日分の値段が決まります。ここに載せているのは市場の値段で、家庭向けの電気料金とは別のものです。出所：日本卸電力取引所「<a href="{JEPX_PAGE}" rel="noopener">スポット市場 取引結果</a>」のデータを加工して作成。気温は気象庁「最新の気象データ」。</p>
+
+  <h2>関連するページ</h2>
+  <ul class="links">
+    <li><a href="{DENKIDAI['path']}">{e(DENKIDAI['h1'])}</a>（家庭の電気代の県庁所在市別の金額・毎月）</li>
+    <li><a href="/kion/">都道府県別の気温</a>（47都道府県のその日の最高・最低気温）</li>
+  </ul>
+
+  <h2>{e(OROSHINE['heading'])}</h2>
+  {items_html(OROSHINE['keywords'], items)}
+  <p class="note">{ITEMS_NOTE}</p>
+"""
+    return page_html(OROSHINE, body)
+
+
 def render_touyu_yasui(page, data, st, items, text):
     """読み物「灯油は何月が安い？」。数字と表はデータから毎回作る。"""
     e = html.escape
@@ -2373,7 +2983,7 @@ def render_samui(page, rows, items, text, win):
     return page_html(page, body)
 
 
-def render_top(obs_at, results, season, guides, daily_at, touyu):
+def render_top(obs_at, results, season, guides, daily_at, touyu, denki=None, oroshi=None):
     entries = []
     for m in METRICS:
         rows = results[m["id"]]
@@ -2423,6 +3033,29 @@ def render_top(obs_at, results, season, guides, daily_at, touyu):
         <span class="d">{html.escape(touyu_stamp(t_data, t_latest))}／押すと都道府県別の一覧へ</span>
       </a>
     </li>""")
+    if denki:
+        d_data, d_latest, d_rows = denki
+        got = [r["val"] for r in d_rows if r["val"] is not None]
+        d_low, d_high = (min(got), max(got)) if got else (0, 0)
+        entries.append(f"""    <li>
+      <a class="entry" href="{DENKIDAI['path']}">
+        <span class="t">{DENKIDAI['h1']}</span>
+        <span class="d">総務省の毎月の調査をもとに、47都道府県の県庁所在市の電気代（1か月{d_data.get('kwh', {}).get(d_latest)}kWhの場合）を並べています。1kWhあたりの金額と、同じ月の灯油の値段も載せています。</span>
+        <span class="mapwrap">{japan_map_svg(d_rows, DENKI_MAP, d_low, d_high, mini=True)}</span>
+        <span class="mapkey"><span>{d_low:,}円</span>{legend_svg(DENKI_MAP, d_low, d_high)}<span>{d_high:,}円</span></span>
+        <span class="d">{html.escape(denki_stamp(d_data, t_data, d_latest))}／押すと都道府県別の一覧へ</span>
+      </a>
+    </li>""")
+    if oroshi:
+        b = date.fromisoformat(oroshi["base"])
+        sys_avg = oroshi["rows"][0]["today"]["avg"]
+        entries.append(f"""    <li>
+      <a class="entry" href="{OROSHINE['path']}">
+        <span class="t">{OROSHINE['h1']}</span>
+        <span class="d">日本卸電力取引所（JEPX）のスポット市場で決まった、9つのエリアの電気の卸値を、各エリアの代表都市のその日の気温と並べています。毎日入れ替わります。</span>
+        <span class="d">{b.month}月{b.day}日のシステムプライスの平均 1kWhあたり{sys_avg:.2f}円／押すとエリア別の一覧へ</span>
+      </a>
+    </li>""")
     pages_html = "\n".join(entries)
     yomi_html = "\n".join(f"""    <li>
       <a class="entry" href="{p['path']}">
@@ -2438,8 +3071,8 @@ def render_top(obs_at, results, season, guides, daily_at, touyu):
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 {GA}
-<title>季節かご｜都道府県別の気温と、暖房・衣替えの目安、灯油の値段（毎日更新）</title>
-<meta name="description" content="気象庁と総務省のデータをもとに、都道府県別のその日の最高気温・最低気温、暖房や衣替えの目安になる平年の気温、県庁所在市の灯油の値段、雨量・風速・湿度をまとめています。">
+<title>季節かご｜都道府県別の気温と、暖房・衣替えの目安、灯油の値段・電気代（毎日更新）</title>
+<meta name="description" content="気象庁と総務省などのデータをもとに、都道府県別のその日の最高気温・最低気温、暖房や衣替えの目安になる平年の気温、県庁所在市の灯油の値段と電気代、電気の卸値、雨量・風速・湿度をまとめています。">
 <link rel="canonical" href="{SITE}/">
 <style>{CSS_TOP}</style>
 </head>
@@ -2559,10 +3192,37 @@ def main():
                         f"月末から{stale}日）。" + " / ".join(touyu_notes))
     touyu_latest, touyu_rows = summarize_touyu(touyu)
 
+    # 電気代：灯油と同じ表。取れなくても前の値でページを作る
+    with open(DENKI_FILE, encoding="utf-8") as f:
+        denki = json.load(f)
+    denki_changed, denki_notes = update_denkidai(denki, now_jst.date())
+    for note in denki_notes:
+        print(f"  ※ 電気代: {note}")
+    d_stale = denki_stale_days(denki, now_jst.date())
+    if d_stale > TOUYU_STALE_DAYS:
+        warnings.append(f"電気代が新しくなっていません（いちばん新しいのは{month_text(max(denki['months']))}分・"
+                        f"月末から{d_stale}日）。" + " / ".join(denki_notes))
+    denki_latest, denki_rows = summarize_denkidai(denki, touyu)
+
+    # 電気の卸値（JEPX）：取れなくても前の値でページを作り、何日も新しくならなければ知らせる
+    if os.path.exists(OROSHI_FILE):
+        with open(OROSHI_FILE, encoding="utf-8") as f:
+            oroshi = json.load(f)
+    else:
+        oroshi = {"source": "日本卸電力取引所「スポット市場 取引結果」・気象庁「最新の気象データ」", "days": {}}
+    oroshi_changed, oroshi_notes = update_oroshine(oroshi, obs_day, daily, heinen, daily_at)
+    for note in oroshi_notes:
+        print(f"  ※ 卸値: {note}")
+    oroshi_summ = summarize_oroshine(oroshi, obs_day)
+    o_stale = oroshi_stale_days(oroshi_summ, obs_day)
+    if o_stale > JEPX_STALE_DAYS:
+        warnings.append(f"電気の卸値が新しくなっていません（{o_stale}日）。" + " / ".join(oroshi_notes))
+
     # 同じ言葉は1回だけ取りに行く。続けて叩くと止められるため間を空ける。
     keyword_sets = [(m["id"], by_season(m["keywords"], season)) for m in METRICS]
     keyword_sets += [(g["id"], g["keywords"]) for g in GUIDES]
     keyword_sets += [(TOUYU["id"], TOUYU["keywords"])]
+    keyword_sets += [(DENKIDAI["id"], DENKIDAI["keywords"]), (OROSHINE["id"], OROSHINE["keywords"])]
     keyword_sets += [(p["id"], p["keywords"]) for p in YOMIMONO]
     pools = {}
     for _, words in keyword_sets:
@@ -2587,6 +3247,8 @@ def main():
         proses[g["id"]] = guide_prose(g, view, rows)
     descs = {g["id"]: guide_desc(g, *guides[g["id"]]) for g in GUIDES}
     proses[TOUYU["id"]] = touyu_prose(touyu, touyu_latest, touyu_rows)
+    proses[DENKIDAI["id"]] = denki_prose(denki, denki_latest, denki_rows, touyu)
+    proses[OROSHINE["id"]] = oroshine_prose(oroshi_summ) if oroshi_summ else ""
     # 読み物：数字は毎回データから計算し、言い回しが成り立たなければ検査で止める
     yasui_stats = touyu_month_stats(touyu)
     yasui_text = touyu_yasui_text(yasui_stats, touyu)
@@ -2605,7 +3267,7 @@ def main():
         "now": now_jst, "age": age, "daily_at": daily_at, "by_pref": by_pref,
         "obs": obs, "daily": daily, "results": results, "heinen": heinen,
         "guides": {k: v[1] for k, v in guides.items()}, "items": items, "proses": proses, "descs": descs,
-        "touyu": touyu,
+        "touyu": touyu, "denki": denki, "oroshi": oroshi_summ,
     })
     # 読み物の言い回しが成り立たないときは、その読み物だけ書き換えずに知らせる（ほかのページは止めない）
     yasui_problems = touyu_yasui_problems(yasui_stats)
@@ -2626,6 +3288,13 @@ def main():
               f"商品{len(items[g['id']])}件")
     print(f"  灯油: {month_text(touyu_latest)}分 / {sum(1 for r in touyu_rows if r['val'] is not None)}市 / "
           f"東京都区部の推移 {max(touyu.get('tokyo', {'-': 0}))}まで / 商品{len(items[TOUYU['id']])}件")
+    print(f"  電気代: {month_text(denki_latest)}分 / {sum(1 for r in denki_rows if r['val'] is not None)}市 / "
+          f"{denki.get('kwh', {}).get(denki_latest)}kWh / 商品{len(items[DENKIDAI['id']])}件")
+    if oroshi_summ:
+        print(f"  卸値: {oroshi_summ['base']}（翌日 {oroshi_summ['next'] or 'まだ'}） / "
+              f"システムプライス平均 {oroshi_summ['rows'][0]['today']['avg']} / 商品{len(items[OROSHINE['id']])}件")
+    else:
+        print("  卸値: データなし（ページは書きません）")
     print(f"  読み物「{TOUYU_YASUI['h1']}」: 東京都区部 {len(yasui_stats['t_rows'])}年 / "
           f"47市 {yasui_stats['c_n']}組 / 商品{len(items[TOUYU_YASUI['id']])}件")
     print(f"  読み物「{SAMUI_KEN['h1']}」: {len(s_rows)}地点 / 商品{len(items[SAMUI_KEN['id']])}件"
@@ -2645,7 +3314,12 @@ def main():
                                      daily_at, heinen, descs[g["id"]]))
     write(TOUYU["out"], render_touyu(touyu, touyu_latest, touyu_rows, items[TOUYU["id"]],
                                      proses[TOUYU["id"]]))
-    written = [p["out"] for p in METRICS + GUIDES + [TOUYU]]
+    write(DENKIDAI["out"], render_denkidai(denki, denki_latest, denki_rows, items[DENKIDAI["id"]],
+                                           proses[DENKIDAI["id"]], touyu))
+    written = [p["out"] for p in METRICS + GUIDES + [TOUYU, DENKIDAI]]
+    if oroshi_summ:
+        write(OROSHINE["out"], render_oroshine(oroshi, oroshi_summ, items[OROSHINE["id"]], proses[OROSHINE["id"]]))
+        written.append(OROSHINE["out"])
     if yasui_problems:
         warnings += yasui_problems
     else:
@@ -2658,12 +3332,18 @@ def main():
         write(SAMUI_KEN["out"], render_samui(SAMUI_KEN, s_rows, items[SAMUI_KEN["id"]], s_text, s_win))
         written.append(SAMUI_KEN["out"])
     write(OUT_TOP, render_top(obs_at, results, season, guides, daily_at,
-                              (touyu, touyu_latest, touyu_rows)))
+                              (touyu, touyu_latest, touyu_rows), (denki, denki_latest, denki_rows), oroshi_summ))
     write(OUT_SITEMAP, render_sitemap(obs_day.isoformat()))
     written += [OUT_TOP, OUT_SITEMAP]
     if touyu_changed:
         write(TOUYU_FILE, json.dumps(touyu, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
         written.append(TOUYU_FILE)
+    if denki_changed:
+        write(DENKI_FILE, json.dumps(denki, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
+        written.append(DENKI_FILE)
+    if oroshi_changed:
+        write(OROSHI_FILE, json.dumps(oroshi, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n")
+        written.append(OROSHI_FILE)
     print(f"検査: 問題なし / 書き出し: {', '.join(written)}")
     # ページは書いたうえで、知らせたいことがあれば残す（自動実行はこれを見て「失敗」にする）
     if warnings:
